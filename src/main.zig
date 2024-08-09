@@ -5,7 +5,8 @@ const OpType = enum {
     Push,
     Plus,
     Minus,
-    Dump
+    Dump,
+    Eq
 };
 
 
@@ -69,6 +70,12 @@ fn simulate_program(program: std.ArrayList(Op)) !void {
                 const a = stack.pop();
                 const b = stack.pop();
                 try stack.append(b - a);
+            },
+
+            OpType.Eq => {
+                const a = stack.pop();
+                const b = stack.pop();
+                try stack.append(@intFromBool(a == b));
             },
 
             OpType.Dump => {
@@ -147,6 +154,17 @@ fn compile_program(program: std.ArrayList(Op), outFilepath: []const u8) !void {
                 try file.writer().print("    push rbx\n", .{});
             },
 
+            OpType.Eq => {
+                try file.writer().print("    ;; -- eq --\n", .{});
+                try file.writer().print("    mov rcx, 0\n", .{});
+                try file.writer().print("    mov rdx, 1\n", .{});
+                try file.writer().print("    pop rax\n", .{});
+                try file.writer().print("    pop rbx\n", .{});
+                try file.writer().print("    cmp rax, rbx\n", .{});
+                try file.writer().print("    cmove rcx, rdx\n", .{});
+                try file.writer().print("    push rcx\n", .{});
+            },
+
             OpType.Dump => {
                 try file.writer().print("    ;; -- dump --\n", .{});
                 try file.writer().print("    pop rdi\n", .{});
@@ -162,14 +180,25 @@ fn compile_program(program: std.ArrayList(Op), outFilepath: []const u8) !void {
 }
 
 
+fn mapInsert(key: []const u8, value: OpType, map: *std.StringHashMap(OpType)) void {
+    map.put(key, value) catch |err| {
+        print("error occured while trying to put value into map: {}\n", .{err});
+    };
+}
+
+
 fn parseWordAsOperation(token: []const u8, line: i32, col: i32, filepath: []const u8) Op {
-    if (std.mem.eql(u8, token, "+")) {
-        return Op.init(OpType.Plus);
-    } else if (std.mem.eql(u8, token, "-")) {
-        return Op.init(OpType.Minus);
-    } else if (std.mem.eql(u8, token, ".")) {
-        return Op.init(OpType.Dump);
-    } 
+    var map = std.StringHashMap(OpType).init(std.heap.page_allocator);
+    defer map.deinit();
+
+    mapInsert("+", OpType.Plus, &map);
+    mapInsert("-", OpType.Minus, &map);
+    mapInsert(".", OpType.Dump, &map);
+    mapInsert("=", OpType.Eq, &map);
+
+    if (map.get(token)) |op_type| {
+        return Op.init(op_type);
+    }
 
     const result = std.fmt.parseInt(i32, token, 10) catch |err| {
         if (err == std.fmt.ParseIntError.InvalidCharacter) {
