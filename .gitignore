@@ -1,0 +1,5 @@
+.zig-cache/
+output
+output.asm
+output.o 
+zig-out/

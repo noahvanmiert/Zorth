@@ -8,9 +8,42 @@ const OpType = enum {
     Dump
 };
 
+
+const Location = struct {
+    line: i32,
+    col: i32,
+    filepath: []const u8,
+
+    pub fn init(line: i32, col: i32, filepath: []const u8) Location {
+        return Location {
+            .line = line,
+            .col = col,
+            .filepath = filepath
+        };
+    }
+};
+
+
 const Op = struct {
     type: OpType,
-    arg: i32
+    arg: i32,
+    loc: Location,
+
+    pub fn init(op_type: OpType) Op {
+        return Op {
+            .type = op_type,
+            .arg = 0,
+            .loc = Location.init(0, 0, "")
+        };
+    }
+
+    pub fn initWithArg(op_type: OpType, arg: i32) Op {
+        return Op {
+            .type = op_type,
+            .arg = arg,
+            .loc = Location.init(0, 0, "")
+        };
+    }
 };
    
 
@@ -129,40 +162,64 @@ fn compile_program(program: std.ArrayList(Op), outFilepath: []const u8) !void {
 }
 
 
-fn parseWordAsOperation(token: []const u8) Op {
+fn parseWordAsOperation(token: []const u8, line: i32, col: i32, filepath: []const u8) Op {
     if (std.mem.eql(u8, token, "+")) {
-        return Op{ .type = OpType.Plus, .arg = 0 };
+        return Op.init(OpType.Plus);
     } else if (std.mem.eql(u8, token, "-")) {
-        return Op{ .type = OpType.Minus, .arg = 0 };
+        return Op.init(OpType.Minus);
     } else if (std.mem.eql(u8, token, ".")) {
-        return Op{ .type = OpType.Dump, .arg = 0 };
+        return Op.init(OpType.Dump);
     } 
 
     const result = std.fmt.parseInt(i32, token, 10) catch |err| {
-        print("ERROR: {}\n", .{err});
+        if (err == std.fmt.ParseIntError.InvalidCharacter) {
+            print("{s}:{d}:{d}: Unkown word: {s}\n", .{filepath, line, col, token});    
+        } else {
+            print("{s}:{d}:{d}: {}", .{filepath, line, col, err});
+        }
+
         std.process.exit(1);
     };
 
-    return Op{ .type = OpType.Push, .arg = result };
+    return Op.initWithArg(OpType.Push, result);
 }
+
 
 
 fn loadProgramFromFile(allocator: *std.mem.Allocator, path: []const u8) !std.ArrayList(Op) {
     var file = try std.fs.cwd().openFile(path, .{});
     defer file.close();
 
-    const file_size = try file.getEndPos();
-    const buffer = try allocator.alloc(u8, file_size);
-
-    const bytes_read = try file.readAll(buffer);
-    std.debug.assert(bytes_read == file_size);
-   
-    // split buffer by whitespace into words
-    var tokenizer = std.mem.tokenize(u8, buffer, " \n\t\r");
     var tokens = std.ArrayList(Op).init(allocator.*);
-    while (tokenizer.next()) |token| {
-        const trimmed_token = std.mem.trimLeft(u8, token, " \n\t\r");
-        try tokens.append(parseWordAsOperation(trimmed_token));
+    var reader = std.io.bufferedReader(file.reader());
+    var line_number: i32 = 1;
+
+    while (true) {
+        const line = try reader.reader().readUntilDelimiterOrEofAlloc(allocator.*, '\n', 255);
+        
+        // if EOF is reached, stop
+        if (line == null) break;
+        
+        const line_start = line.?[0..].ptr; // Pointer to the start of the line
+
+        var tokenizer = std.mem.tokenize(u8, line.?, " \n\t\r");
+        while (tokenizer.next()) |token| {
+            // Pointer to the start of the current token 
+            const token_start = token.ptr;
+
+            // We get the column by subtracting the start of the token minus the start of the line + 1 (because the 0th col should be 1)
+            const col = @intFromPtr(token_start) - @intFromPtr(line_start) + 1;
+
+            const trimmed_token = std.mem.trimLeft(u8, token, " \n\t\r");
+            var operation = parseWordAsOperation(trimmed_token, line_number, @intCast(col), path);
+            
+            operation.loc = Location.init(line_number, @intCast(col), path);
+
+            try tokens.append(operation);
+        }
+        
+        line_number += 1;
+        allocator.free(line.?);
     }
 
     return tokens;
