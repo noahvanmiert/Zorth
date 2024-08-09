@@ -5,8 +5,10 @@ const OpType = enum {
     Push,
     Plus,
     Minus,
+    Eq,
     Dump,
-    Eq
+    If,
+    End,
 };
 
 
@@ -27,13 +29,13 @@ const Location = struct {
 
 const Op = struct {
     type: OpType,
-    arg: i32,
+    arg: ?i32,
     loc: Location,
 
     pub fn init(op_type: OpType) Op {
         return Op {
             .type = op_type,
-            .arg = 0,
+            .arg = null,
             .loc = Location.init(0, 0, "")
         };
     }
@@ -54,10 +56,14 @@ fn simulate_program(program: std.ArrayList(Op)) !void {
     var stack = std.ArrayList(i32).init(gpa.allocator());
     defer stack.deinit();
 
-    for (program.items) |op| {
+    var ip: usize = 0;
+
+    while (ip < program.items.len) {
+        const op = program.items[ip];
+
         switch (op.type) {
             OpType.Push => {
-                try stack.append(op.arg);
+                try stack.append(op.arg.?);
             },
 
             OpType.Plus => {
@@ -78,10 +84,30 @@ fn simulate_program(program: std.ArrayList(Op)) !void {
                 try stack.append(@intFromBool(a == b));
             },
 
+
+            OpType.If => { 
+                const a = stack.pop();
+
+                if (a == 0) {
+                    if (op.arg == null) {
+                        print("{s}:{d}:{d}: `if` instruction does not have a reference to the end of its block\n", .{op.loc.filepath, op.loc.line, op.loc.col});
+                        std.process.exit(1);
+                    }
+
+                    ip = @intCast(op.arg.?);                    
+                }
+            },
+
+            OpType.End => {
+
+            },
+
             OpType.Dump => {
                 print("{d}\n", .{stack.pop()});
             },
         }
+
+        ip += 1;
     }
 }
 
@@ -134,8 +160,8 @@ fn compile_program(program: std.ArrayList(Op), outFilepath: []const u8) !void {
     for (program.items) |op| {
         switch (op.type) {
             OpType.Push => {
-                try file.writer().print("    ;; -- push {d} --\n", .{op.arg});
-                try file.writer().print("    push {d}\n", .{op.arg});
+                try file.writer().print("    ;; -- push {?} --\n", .{op.arg});
+                try file.writer().print("    push {?}\n", .{op.arg});
             },
 
             OpType.Plus => {
@@ -165,6 +191,14 @@ fn compile_program(program: std.ArrayList(Op), outFilepath: []const u8) !void {
                 try file.writer().print("    push rcx\n", .{});
             },
 
+            OpType.If => {
+                
+            },
+
+            OpType.End => {
+
+            },
+
             OpType.Dump => {
                 try file.writer().print("    ;; -- dump --\n", .{});
                 try file.writer().print("    pop rdi\n", .{});
@@ -180,9 +214,35 @@ fn compile_program(program: std.ArrayList(Op), outFilepath: []const u8) !void {
 }
 
 
+fn crossreferenceProgram(program: *std.ArrayList(Op)) !void {
+    var stack = std.ArrayList(usize).init(std.heap.page_allocator);
+    defer stack.deinit();
+    
+    var ip: usize = 0;
+    while (ip < program.items.len) {
+        const op = program.items[ip];
+
+        if (op.type == OpType.If) {
+            try stack.append(ip);
+        } else if (op.type == OpType.End) {
+            const if_ip = stack.pop();
+            
+            if (program.items[if_ip].type != OpType.If) {
+                print("{s}:{d}:{d}: `end` can only close if blocks for now\n", .{op.loc.filepath, op.loc.line, op.loc.col});
+            }
+
+            program.items[if_ip].arg = @intCast(ip);
+        }
+    
+        ip += 1;
+    }
+            
+}
+
+
 fn mapInsert(key: []const u8, value: OpType, map: *std.StringHashMap(OpType)) void {
     map.put(key, value) catch |err| {
-        print("error occured while trying to put value into map: {}\n", .{err});
+        print("error occured while trying to put value into map: {?}\n", .{err});
     };
 }
 
@@ -193,8 +253,10 @@ fn parseWordAsOperation(token: []const u8, line: i32, col: i32, filepath: []cons
 
     mapInsert("+", OpType.Plus, &map);
     mapInsert("-", OpType.Minus, &map);
-    mapInsert(".", OpType.Dump, &map);
     mapInsert("=", OpType.Eq, &map);
+    mapInsert(".", OpType.Dump, &map);
+    mapInsert("if", OpType.If, &map);
+    mapInsert("end", OpType.End, &map);
 
     if (map.get(token)) |op_type| {
         return Op.init(op_type);
@@ -204,7 +266,7 @@ fn parseWordAsOperation(token: []const u8, line: i32, col: i32, filepath: []cons
         if (err == std.fmt.ParseIntError.InvalidCharacter) {
             print("{s}:{d}:{d}: Unkown word: {s}\n", .{filepath, line, col, token});    
         } else {
-            print("{s}:{d}:{d}: {}", .{filepath, line, col, err});
+            print("{s}:{d}:{d}: {?}", .{filepath, line, col, err});
         }
 
         std.process.exit(1);
@@ -263,7 +325,7 @@ fn runCommand(command: []const []const u8) !void {
     const exit_code = try child.wait();
 
     if (exit_code.Exited != 0) {
-        print("Subprocess failed ({s}) with exit code {}\n", .{command[0], exit_code});
+        print("Subprocess failed ({s}) with exit code {?}\n", .{command[0], exit_code});
     }
 }   
 
@@ -302,9 +364,10 @@ pub fn main() !void {
             std.process.exit(1);
         }
 
-        const program = try loadProgramFromFile(&allocator, argv[0]);
+        var program = try loadProgramFromFile(&allocator, argv[0]);
         defer program.deinit();
-
+        
+        try crossreferenceProgram(&program);
         try simulate_program(program);
     } else if (std.mem.eql(u8, subcommand, "com")) {
         if (argv.len < 1) {
@@ -313,9 +376,10 @@ pub fn main() !void {
             std.process.exit(1);
         }
 
-        const program = try loadProgramFromFile(&allocator, argv[0]);
+        var program = try loadProgramFromFile(&allocator, argv[0]);
         defer program.deinit();
 
+        try crossreferenceProgram(&program);
         try compile_program(program, "output.asm");
 
         try runCommand(&.{"nasm", "-felf64", "output.asm"});
