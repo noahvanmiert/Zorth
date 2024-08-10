@@ -1,7 +1,13 @@
 // Made by Noah Van Miert
 
-40 69 > if 
-	1 .
-else
-	0 . 
+5
+while dup 0 > do 
+	dup 2 + 4 = if
+		1 .
+	else 
+		0 .
+	end
+
+	1 - 
 end
+

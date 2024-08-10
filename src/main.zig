@@ -13,6 +13,8 @@ const OpType = enum {
     Dump,
     If,
     Else,
+    While,
+    Do,
     End,
 };
 
@@ -54,88 +56,6 @@ const Op = struct {
     }
 };
    
-
-fn simulate_program(program: std.ArrayList(Op)) !void {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
-
-    var stack = std.ArrayList(i32).init(gpa.allocator());
-    defer stack.deinit();
-
-    var ip: usize = 0;
-
-    while (ip < program.items.len) {
-        const op = program.items[ip];
-
-        switch (op.type) {
-            OpType.Push => {
-                try stack.append(op.arg.?);
-            },
-
-            OpType.Plus => {
-                const a = stack.pop();
-                const b = stack.pop();
-                try stack.append(a + b);
-            },
-
-            OpType.Minus => {
-                const a = stack.pop();
-                const b = stack.pop();
-                try stack.append(b - a);
-            },
-
-            OpType.Eq => {
-                const a = stack.pop();
-                const b = stack.pop();
-                try stack.append(@intFromBool(a == b));
-            },
-
-            OpType.Gt => {
-                const a = stack.pop();
-                const b = stack.pop();
-                try stack.append(@intFromBool(b > a));
-            },
-
-            OpType.Dup => {
-                const a = stack.pop();
-                try stack.append(a);
-                try stack.append(a);
-            },
-
-            OpType.If => { 
-                const a = stack.pop();
-
-                if (op.arg == null) {
-                    print("{s}:{d}:{d}: `if` instruction does not have a reference to the end of its block\n", .{op.loc.filepath, op.loc.line, op.loc.col});
-                    exit(1);
-                }
-
-                if (a == 0) {
-                    ip = @intCast(op.arg.?);                    
-                }
-            },
-
-            OpType.Else => {
-                if (op.arg == null) {
-                    print("{s}:{d}:{d}: `else` instruction does not have a reference to the end of its block\n", .{op.loc.filepath, op.loc.line, op.loc.col});
-                    exit(1);
-                }
-
-                ip = @intCast(op.arg.?);
-            },
-
-            OpType.End => {
-
-            },
-
-            OpType.Dump => {
-                print("{d}\n", .{stack.pop()});
-            },
-        }
-
-        ip += 1;
-    }
-}
-
 
 fn compile_program(program: std.ArrayList(Op), outFilepath: []const u8) !void { 
     const file = try std.fs.cwd().createFile(
@@ -185,7 +105,8 @@ fn compile_program(program: std.ArrayList(Op), outFilepath: []const u8) !void {
     var ip: usize = 0;
     while (ip < program.items.len) {
         const op = program.items[ip];
-
+        
+        try file.writer().print("addr_{}:\n", .{ip});
         switch (op.type) {
             OpType.Push => {
                 try file.writer().print("    ;; -- push {?} --\n", .{op.arg});
@@ -259,11 +180,35 @@ fn compile_program(program: std.ArrayList(Op), outFilepath: []const u8) !void {
                 
                 try file.writer().print("    ;; -- else --\n", .{});
                 try file.writer().print("    jmp addr_{?}\n", .{op.arg});
-                try file.writer().print("addr_{}:\n", .{ip});
+            },
+
+            OpType.While => {
+                try file.writer().print("    ;; -- while --\n", .{});
+            },
+
+            OpType.Do => {
+                try file.writer().print("    ;; -- do --\n", .{});
+                try file.writer().print("    pop rax\n", .{});
+                try file.writer().print("    test rax, rax\n", .{});
+
+                if (op.arg == null) {
+                    print("{s}:{d}:{d}: `if` instruction does not have a reference to the end of its block\n", .{op.loc.filepath, op.loc.line, op.loc.col});
+                    exit(1);
+                }
+                
+                try file.writer().print("    jz addr_{?}\n", .{op.arg.?});
             },
 
             OpType.End => {
-                try file.writer().print("addr_{d}:\n", .{ip});
+                if (op.arg == null) {
+                    print("{s}:{d}:{d}: `end` instruction does not have a reference to the next instruction to jump to\n", .{op.loc.filepath, op.loc.line, op.loc.col});
+                    exit(1);
+                }
+
+                try file.writer().print("    ;; -- end --\n", .{});
+                if (ip + 1 != op.arg.?) {
+                    try file.writer().print("    jmp addr_{?}\n", .{op.arg});
+                }
             },
 
             OpType.Dump => {
@@ -275,7 +220,8 @@ fn compile_program(program: std.ArrayList(Op), outFilepath: []const u8) !void {
 
         ip += 1;
     }
-
+    
+    try file.writer().print("addr_{}:\n", .{program.items.len});
     _ = try file.write("    ;; exit with non-zero exit code\n");
     _ = try file.write("    mov rax, 60\n");
     _ = try file.write("    mov rdi, 0\n");
@@ -295,22 +241,22 @@ fn crossreferenceProgram(program: *std.ArrayList(Op)) !void {
             try stack.append(ip);
         } else if (op.type == OpType.Else) {
             if (stack.items.len < 1) {
-            print("{s}:{d}:{d}: `else` can only be used with if-blocks\n", .{op.loc.filepath, op.loc.line, op.loc.col});
+                print("{s}:{d}:{d}: `else` can only be used with if-blocks\n", .{op.loc.filepath, op.loc.line, op.loc.col});
                 exit(1);
             }
 
             const if_ip = stack.pop();
 
             if (program.items[if_ip].type != OpType.If) {
-                print("{s}:{d}:{d}: `else` can only be used with if-blocks\n", .{op.loc.filepath, op.loc.line, op.loc.col});
+                print("{s}:{d}:{d}: `else` can only be used with `if` blocks\n", .{op.loc.filepath, op.loc.line, op.loc.col});
                 exit(1);
             }
 
-            program.items[if_ip].arg = @intCast(ip);
+            program.items[if_ip].arg = @intCast(ip + 1);
             try stack.append(ip);
         } else if (op.type == OpType.End) {
             if (stack.items.len < 1) {
-                print("{s}:{d}:{d}: `else` can only be used with if-blocks\n", .{op.loc.filepath, op.loc.line, op.loc.col});
+                print("{s}:{d}:{d}: `else` can only be used with `if` blocks\n", .{op.loc.filepath, op.loc.line, op.loc.col});
                 exit(1);
             }
 
@@ -318,10 +264,29 @@ fn crossreferenceProgram(program: *std.ArrayList(Op)) !void {
             
             if (program.items[block_ip].type == OpType.If or program.items[block_ip].type == OpType.Else)  {
                 program.items[block_ip].arg = @intCast(ip);
+                program.items[ip].arg = @intCast(ip + 1);
+            } else if (program.items[block_ip].type == OpType.Do) {
+                 if (program.items[block_ip].arg == null) {
+                     std.debug.assert(false);
+                }
+                
+                program.items[ip].arg = program.items[block_ip].arg;
+                program.items[block_ip].arg = @intCast(ip + 1);
             } else {
-                print("{s}:{d}:{d}: `end` can only close `if-else` blocks for now\n", .{op.loc.filepath, op.loc.line, op.loc.col});
+                print("{s}:{d}:{d}: `end` can only close `if`, `else` and `while` blocks for now\n", .{op.loc.filepath, op.loc.line, op.loc.col});
                 exit(1);
             }
+        } else if (op.type == OpType.While) {
+            try stack.append(ip);
+        } else if (op.type == OpType.Do) {
+            if (stack.items.len < 1) {
+                print("{s}:{d}:{d}: `do` can only be used with `while` blocks\n", .{op.loc.filepath, op.loc.line, op.loc.col});
+                exit(1);
+            }
+
+            const while_ip = stack.pop();
+            program.items[ip].arg = @intCast(while_ip);
+            try stack.append(ip);
         }
     
         ip += 1;
@@ -350,6 +315,8 @@ fn parseWordAsOperation(token: []const u8, line: i32, col: i32, filepath: []cons
     mapInsert("dup", OpType.Dup, &map);
     mapInsert("if", OpType.If, &map);
     mapInsert("else", OpType.Else, &map);
+    mapInsert("while", OpType.While, &map);
+    mapInsert("do", OpType.Do, &map);
     mapInsert("end", OpType.End, &map);
 
     if (map.get(token)) |op_type| {
@@ -431,7 +398,6 @@ fn runCommand(command: []const []const u8) !void {
 fn usage() void {
     print("Usage: zorth <SUBCOMMAND> [ARGS]\n", .{});
     print("SUBCOMMANDS:\n", .{});
-    print("    sim <file>    Simulate the program\n", .{});
     print("    com <file>    Compile the program\n", .{});
 }
 
@@ -455,23 +421,11 @@ pub fn main() !void {
     const subcommand = args[1];
     argv = argv[1..]; // remove subcommand
         
-    if (std.mem.eql(u8, subcommand, "sim")) {
-        if (argv.len < 1) {
-            usage();
-            print("ERROR: no input file is provided for the simulation\n", .{});
-            std.process.exit(1);
-        }
-
-        var program = try loadProgramFromFile(&allocator, argv[0]);
-        defer program.deinit();
-        
-        try crossreferenceProgram(&program);
-        try simulate_program(program);
-    } else if (std.mem.eql(u8, subcommand, "com")) {
+    if (std.mem.eql(u8, subcommand, "com")) {
         if (argv.len < 1) {
             usage();
             print("ERROR: no input file is  provided for the compilation\n", .{});
-            std.process.exit(1);
+            exit(1);
         }
 
         var program = try loadProgramFromFile(&allocator, argv[0]);
@@ -485,7 +439,7 @@ pub fn main() !void {
     } else {
         print("ERROR: unkown subcommand: {s}\n", .{subcommand});
         usage();
-        std.process.exit(1);
+        exit(1);
     }
 }
 
