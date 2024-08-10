@@ -3,7 +3,9 @@ const std = @import("std");
 const print = std.debug.print;
 const exit = std.process.exit;
 
-const MEMORY_CAPACITY = 640000;
+const Globals = enum(i32) {
+    MemoryCapacity = 640000,
+};
 
 const OpType = enum {
     Push,
@@ -11,7 +13,12 @@ const OpType = enum {
     Minus,
     Eq,
     Dup,
+    Dup2,
+    Drop,
+    Swap,
+    Over,
     Gt,
+    St,
     Dump,
     If,
     Else,
@@ -23,6 +30,10 @@ const OpType = enum {
     Store,   // 1 byte
     Syscall1,
     Syscall3,
+    Shr,
+    Shl,
+    Bor,
+    Band
 };
 
 
@@ -159,11 +170,55 @@ fn compile_program(program: std.ArrayList(Op), outFilepath: []const u8) !void {
                 
             },
 
+            OpType.St => {
+                try file.writer().print("    ;; -- st --\n", .{});
+                try file.writer().print("    mov rcx, 0\n", .{});
+                try file.writer().print("    mov rdx, 1\n", .{});
+                try file.writer().print("    pop rbx\n", .{});
+                try file.writer().print("    pop rax\n", .{});
+                try file.writer().print("    cmp rax, rbx\n", .{});
+                try file.writer().print("    cmovl rcx, rdx\n", .{});
+                try file.writer().print("    push rcx\n", .{});
+                
+            },
+
             OpType.Dup => {
                 try file.writer().print("    ;; -- dup --\n", .{});
                 try file.writer().print("    pop rax\n", .{});
                 try file.writer().print("    push rax\n", .{});
                 try file.writer().print("    push rax\n", .{});
+            },
+
+            OpType.Dup2 => {
+                try file.writer().print("    ;; -- 2dup --\n", .{});
+                try file.writer().print("    pop rbx\n", .{});
+                try file.writer().print("    pop rax\n", .{});
+                try file.writer().print("    push rax\n", .{});
+                try file.writer().print("    push rbx\n", .{});
+                try file.writer().print("    push rax\n", .{});
+                try file.writer().print("    push rbx\n", .{});
+            },
+
+            OpType.Drop => {
+                try file.writer().print("    ;; -- drop --\n", .{});
+                try file.writer().print("    pop rax\n", .{});
+            },
+
+            OpType.Swap => {
+                try file.writer().print("    ;; -- swap --\n", .{});
+                try file.writer().print("    pop rax\n", .{});
+                try file.writer().print("    pop rbx\n", .{});
+                try file.writer().print("    push rax\n", .{});
+                try file.writer().print("    push rbx\n", .{});
+            },
+
+            OpType.Over => {
+                try file.writer().print("    ;; -- over --\n", .{});
+                try file.writer().print("    pop rax\n", .{});
+                try file.writer().print("    pop rbx\n", .{});
+                try file.writer().print("    push rbx\n", .{});
+                try file.writer().print("    push rax\n", .{});
+                try file.writer().print("    push rbx\n", .{});
             },
 
             OpType.If => {
@@ -260,6 +315,39 @@ fn compile_program(program: std.ArrayList(Op), outFilepath: []const u8) !void {
                 try file.writer().print("    syscall\n", .{});
                 
             },
+
+            OpType.Shr => {
+                try file.writer().print("    ;; -- shr --\n", .{});
+                try file.writer().print("    pop rcx\n", .{});
+                try file.writer().print("    pop rbx\n", .{});
+                try file.writer().print("    shr rbx, cl\n", .{});
+                try file.writer().print("    push rbx\n", .{});
+            },
+
+            OpType.Shl => {
+                try file.writer().print("    ;; -- shl --\n", .{});
+                try file.writer().print("    pop rcx\n", .{});
+                try file.writer().print("    pop rbx\n", .{});
+                try file.writer().print("    shl rbx, cl\n", .{});
+                try file.writer().print("    push rbx\n", .{});
+            },
+
+            OpType.Bor => {
+                try file.writer().print("    ;; -- bor --\n", .{});
+                try file.writer().print("    pop rax\n", .{});
+                try file.writer().print("    pop rbx\n", .{});
+                try file.writer().print("    or rbx, rax\n", .{});
+                try file.writer().print("    push rbx\n", .{});
+            },
+
+            OpType.Band => {
+                try file.writer().print("    ;; -- band --\n", .{});
+                try file.writer().print("    pop rax\n", .{});
+                try file.writer().print("    pop rbx\n", .{});
+                try file.writer().print("    and rbx, rax\n", .{});
+                try file.writer().print("    push rbx\n", .{});
+            },
+
         }
 
         ip += 1;
@@ -272,7 +360,7 @@ fn compile_program(program: std.ArrayList(Op), outFilepath: []const u8) !void {
     _ = try file.write("    syscall\n");
 
     _ = try file.write("segment .bss\n");
-    try file.writer().print("mem: resb {d}\n", .{MEMORY_CAPACITY});
+    try file.writer().print("mem: resb {d}\n", .{@intFromEnum(Globals.MemoryCapacity)});
 }
 
 
@@ -359,7 +447,12 @@ fn parseWordAsOperation(token: []const u8, line: i32, col: i32, filepath: []cons
     mapInsert("=", OpType.Eq, &map);
     mapInsert("dump", OpType.Dump, &map);
     mapInsert(">", OpType.Gt, &map);
+    mapInsert("<", OpType.St, &map);
     mapInsert("dup", OpType.Dup, &map);
+    mapInsert("2dup", OpType.Dup2, &map);
+    mapInsert("drop", OpType.Drop, &map);
+    mapInsert("swap", OpType.Swap, &map);
+    mapInsert("over", OpType.Over, &map);
     mapInsert("if", OpType.If, &map);
     mapInsert("else", OpType.Else, &map);
     mapInsert("while", OpType.While, &map);
@@ -370,6 +463,10 @@ fn parseWordAsOperation(token: []const u8, line: i32, col: i32, filepath: []cons
     mapInsert("store8", OpType.Store, &map);
     mapInsert("syscall1", OpType.Syscall1, &map);
     mapInsert("syscall3", OpType.Syscall3, &map);
+    mapInsert("shl", OpType.Shl, &map);
+    mapInsert("shr", OpType.Shr, &map);
+    mapInsert("bor", OpType.Bor, &map);
+    mapInsert("band", OpType.Band, &map);
 
     if (map.get(token)) |op_type| {
         return Op.init(op_type);
