@@ -2,12 +2,6 @@
 
 5
 while dup 0 > do 
-	dup 2 + 4 = if
-		1 .
-	else 
-		0 .
-	end
-
+	dup . 
 	1 - 
 end
-

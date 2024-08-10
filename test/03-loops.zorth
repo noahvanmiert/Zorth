@@ -1,0 +1,16 @@
+10 while dup 0 > do 
+	dup dump
+	1 - 
+end
+
+// Expected results
+// 10 
+// 9
+// 8
+// 7 
+// 6 
+// 5 
+// 4 
+// 3
+// 2 
+// 1

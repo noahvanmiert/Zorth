@@ -3,6 +3,8 @@ const std = @import("std");
 const print = std.debug.print;
 const exit = std.process.exit;
 
+const MEMORY_CAPACITY = 640000;
+
 const OpType = enum {
     Push,
     Plus,
@@ -16,6 +18,11 @@ const OpType = enum {
     While,
     Do,
     End,
+    Mem,
+    Load,   // 1 byte 
+    Store,   // 1 byte
+    Syscall1,
+    Syscall3,
 };
 
 
@@ -211,11 +218,48 @@ fn compile_program(program: std.ArrayList(Op), outFilepath: []const u8) !void {
                 }
             },
 
+            OpType.Mem => {
+                try file.writer().print("    ;; -- mem --\n", .{});
+                try file.writer().print("    push mem\n", .{});
+             },
+
             OpType.Dump => {
                 try file.writer().print("    ;; -- dump --\n", .{});
                 try file.writer().print("    pop rdi\n", .{});
                 try file.writer().print("    call print\n", .{});
-            }
+            },
+
+            OpType.Load => {
+                try file.writer().print("    ;; -- load8 --\n", .{});
+                try file.writer().print("    pop rax\n", .{});
+                try file.writer().print("    xor rbx, rbx\n", .{});
+                try file.writer().print("    mov bl, [rax]\n", .{});
+                try file.writer().print("    push rbx\n", .{});
+            },
+
+            OpType.Store => {
+                try file.writer().print("    ;; -- store8 --\n", .{});
+                try file.writer().print("    pop rbx\n", .{});
+                try file.writer().print("    pop rax\n", .{});
+                try file.writer().print("    mov [rax], bl\n", .{});
+            },
+
+            OpType.Syscall1 => {
+                try file.writer().print("    ;; -- syscall1 --\n", .{});
+                try file.writer().print("    pop rax\n", .{});
+                try file.writer().print("    pop rdi\n", .{});
+                try file.writer().print("    syscall\n", .{});
+            },
+
+            OpType.Syscall3 => {
+                try file.writer().print("    ;; -- syscall3 --\n", .{});
+                try file.writer().print("    pop rax\n", .{});
+                try file.writer().print("    pop rdi\n", .{});
+                try file.writer().print("    pop rsi\n", .{});
+                try file.writer().print("    pop rdx\n", .{});
+                try file.writer().print("    syscall\n", .{});
+                
+            },
         }
 
         ip += 1;
@@ -226,6 +270,9 @@ fn compile_program(program: std.ArrayList(Op), outFilepath: []const u8) !void {
     _ = try file.write("    mov rax, 60\n");
     _ = try file.write("    mov rdi, 0\n");
     _ = try file.write("    syscall\n");
+
+    _ = try file.write("segment .bss\n");
+    try file.writer().print("mem: resb {d}\n", .{MEMORY_CAPACITY});
 }
 
 
@@ -310,7 +357,7 @@ fn parseWordAsOperation(token: []const u8, line: i32, col: i32, filepath: []cons
     mapInsert("+", OpType.Plus, &map);
     mapInsert("-", OpType.Minus, &map);
     mapInsert("=", OpType.Eq, &map);
-    mapInsert(".", OpType.Dump, &map);
+    mapInsert("dump", OpType.Dump, &map);
     mapInsert(">", OpType.Gt, &map);
     mapInsert("dup", OpType.Dup, &map);
     mapInsert("if", OpType.If, &map);
@@ -318,6 +365,11 @@ fn parseWordAsOperation(token: []const u8, line: i32, col: i32, filepath: []cons
     mapInsert("while", OpType.While, &map);
     mapInsert("do", OpType.Do, &map);
     mapInsert("end", OpType.End, &map);
+    mapInsert("mem", OpType.Mem, &map);
+    mapInsert("load8", OpType.Load, &map);
+    mapInsert("store8", OpType.Store, &map);
+    mapInsert("syscall1", OpType.Syscall1, &map);
+    mapInsert("syscall3", OpType.Syscall3, &map);
 
     if (map.get(token)) |op_type| {
         return Op.init(op_type);
