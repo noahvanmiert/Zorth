@@ -1,6 +1,1 @@
-1		// fd
-mem     // buf 
-3       // count
-3		// amount of arguments of the syscall
-1       // the syscall number
-syscall 
+

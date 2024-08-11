@@ -9,6 +9,7 @@ const Globals = enum(i32) {
 
 const OpType = enum {
     Push,
+    PushStr,
     Plus,
     Minus,
     Eq,
@@ -55,21 +56,44 @@ const Location = struct {
 const Op = struct {
     type: OpType,
     arg: ?i32,
+    stringArg: ?[]const u8,
     loc: Location,
 
     pub fn init(op_type: OpType) Op {
         return Op {
             .type = op_type,
             .arg = null,
+            .stringArg = null,
             .loc = Location.init(0, 0, "")
         };
     }
 
-    pub fn initWithArg(op_type: OpType, arg: i32) Op {
+    pub fn initWithArg(op_type: OpType, arg: ?i32, stringArg: ?[]const u8) Op {
         return Op {
             .type = op_type,
             .arg = arg,
+            .stringArg = stringArg,
             .loc = Location.init(0, 0, "")
+        };
+    }
+};
+
+
+const TokenType = enum {
+    Word,
+    Int,
+    String
+};
+
+
+const Token = struct {
+    value: []const u8,
+    type: TokenType,
+
+    fn init(value: []const u8, _type: TokenType) Token {
+        return Token {
+            .value = value,
+            .type = _type,
         };
     }
 };
@@ -120,6 +144,9 @@ fn compile_program(program: std.ArrayList(Op), outFilepath: []const u8) !void {
     _ = try file.write("global _start\n");
     _ = try file.write("_start:\n");
 
+    var strings = std.ArrayList([]const u8).init(std.heap.page_allocator);
+    defer strings.deinit();
+
     var ip: usize = 0;
     while (ip < program.items.len) {
         const op = program.items[ip];
@@ -127,8 +154,16 @@ fn compile_program(program: std.ArrayList(Op), outFilepath: []const u8) !void {
         try file.writer().print("addr_{}:\n", .{ip});
         switch (op.type) {
             OpType.Push => {
-                try file.writer().print("    ;; -- push {?} --\n", .{op.arg});
+                try file.writer().print("    ;; -- push int --\n", .{});
                 try file.writer().print("    push {?}\n", .{op.arg});
+            },
+
+            OpType.PushStr => {
+                try file.writer().print("    ;; -- push str --\n", .{});
+                try file.writer().print("    mov rax, {d}\n", .{op.stringArg.?.len}); 
+                try file.writer().print("    push rax\n", .{});
+                try file.writer().print("    push str_{d}\n", .{strings.items.len});
+                try strings.append(op.stringArg.?);
             },
 
             OpType.Plus => {
@@ -359,6 +394,24 @@ fn compile_program(program: std.ArrayList(Op), outFilepath: []const u8) !void {
     _ = try file.write("    mov rdi, 0\n");
     _ = try file.write("    syscall\n");
 
+    _ = try file.write("segment .data\n");
+
+    for (0..strings.items.len) |index| {
+        const string = strings.items[index];
+        try file.writer().print("str_{d}: ", .{index});
+
+        // Convert the string to a series of bytes
+        try file.writer().print("    db ", .{});
+            
+        // Write each byte in hexadecimal format
+        for (string) |c| {
+            try file.writer().print("0x{x}, ", .{c});
+        }
+            
+        // Add null terminator at the end
+        try file.writer().print("0\n", .{}); // Newline after the null terminator  
+    }
+
     _ = try file.write("segment .bss\n");
     try file.writer().print("mem: resb {d}\n", .{@intFromEnum(Globals.MemoryCapacity)});
 }
@@ -438,53 +491,78 @@ fn mapInsert(key: []const u8, value: OpType, map: *std.StringHashMap(OpType)) vo
 }
 
 
-fn parseWordAsOperation(token: []const u8, line: i32, col: i32, filepath: []const u8) Op {
-    var map = std.StringHashMap(OpType).init(std.heap.page_allocator);
-    defer map.deinit();
+fn parseWordAsOperation(token: Token, line: i32, col: i32, filepath: []const u8) Op {
+    if (token.type == TokenType.Word) { 
+        var map = std.StringHashMap(OpType).init(std.heap.page_allocator);
+        defer map.deinit();
 
-    mapInsert("+", OpType.Plus, &map);
-    mapInsert("-", OpType.Minus, &map);
-    mapInsert("=", OpType.Eq, &map);
-    mapInsert("dump", OpType.Dump, &map);
-    mapInsert(">", OpType.Gt, &map);
-    mapInsert("<", OpType.St, &map);
-    mapInsert("dup", OpType.Dup, &map);
-    mapInsert("2dup", OpType.Dup2, &map);
-    mapInsert("drop", OpType.Drop, &map);
-    mapInsert("swap", OpType.Swap, &map);
-    mapInsert("over", OpType.Over, &map);
-    mapInsert("if", OpType.If, &map);
-    mapInsert("else", OpType.Else, &map);
-    mapInsert("while", OpType.While, &map);
-    mapInsert("do", OpType.Do, &map);
-    mapInsert("end", OpType.End, &map);
-    mapInsert("mem", OpType.Mem, &map);
-    mapInsert("load8", OpType.Load, &map);
-    mapInsert("store8", OpType.Store, &map);
-    mapInsert("syscall1", OpType.Syscall1, &map);
-    mapInsert("syscall3", OpType.Syscall3, &map);
-    mapInsert("shl", OpType.Shl, &map);
-    mapInsert("shr", OpType.Shr, &map);
-    mapInsert("bor", OpType.Bor, &map);
-    mapInsert("band", OpType.Band, &map);
-
-    if (map.get(token)) |op_type| {
-        return Op.init(op_type);
-    }
-
-    const result = std.fmt.parseInt(i32, token, 10) catch |err| {
-        if (err == std.fmt.ParseIntError.InvalidCharacter) {
-            print("{s}:{d}:{d}: Unkown word: {s}\n", .{filepath, line, col, token});    
+        mapInsert("+", OpType.Plus, &map);
+        mapInsert("-", OpType.Minus, &map);
+        mapInsert("=", OpType.Eq, &map);
+        mapInsert("dump", OpType.Dump, &map);
+        mapInsert(">", OpType.Gt, &map);
+        mapInsert("<", OpType.St, &map);
+        mapInsert("dup", OpType.Dup, &map);
+        mapInsert("2dup", OpType.Dup2, &map);
+        mapInsert("drop", OpType.Drop, &map);
+        mapInsert("swap", OpType.Swap, &map);
+        mapInsert("over", OpType.Over, &map);
+        mapInsert("if", OpType.If, &map);
+        mapInsert("else", OpType.Else, &map);
+        mapInsert("while", OpType.While, &map);
+        mapInsert("do", OpType.Do, &map);
+        mapInsert("end", OpType.End, &map);
+        mapInsert("mem", OpType.Mem, &map);
+        mapInsert("load8", OpType.Load, &map);
+        mapInsert("store8", OpType.Store, &map);
+        mapInsert("syscall1", OpType.Syscall1, &map);
+        mapInsert("syscall3", OpType.Syscall3, &map);
+        mapInsert("shl", OpType.Shl, &map);
+        mapInsert("shr", OpType.Shr, &map);
+        mapInsert("bor", OpType.Bor, &map);
+        mapInsert("band", OpType.Band, &map);
+    
+        if (map.get(token.value)) |op_type| {
+            return Op.init(op_type);
         } else {
-            print("{s}:{d}:{d}: {?}", .{filepath, line, col, err});
+            print("{s}:{d}:{d}: Unkown word: {s}\n", .{filepath, line, col, token.value});
+            exit(1);
         }
+        
+    } else if (token.type == TokenType.Int) {
+        const result = std.fmt.parseInt(i32, token.value, 10) catch |err| {
+            if (err == std.fmt.ParseIntError.Overflow) {
+                print("{s}:{d}:{d}: {?}", .{filepath, line, col, err});
+            }
 
-        std.process.exit(1);
-    };
+            exit(1);
+        };
 
-    return Op.initWithArg(OpType.Push, result);
+        return Op.initWithArg(OpType.Push, result, null);
+    } else {
+        return Op.initWithArg(OpType.PushStr, null, token.value); 
+    }
 }
 
+
+fn isValidBase10(s: []const u8) bool {
+    if (s.len == 0) return false; // Empty string is not a valid number
+
+    var start: usize = 0;
+    if (s[0] == '-') {
+        if (s.len == 1) return false; // "-" alone is not a valid number
+        start = 1; // Skip the minus sign if present
+    }
+
+    for (start..s.len) |i| {
+        const c = s[i];
+        if (c < '0' or c > '9') {
+            return false; // Not a digit
+        }
+    }
+
+    return true; // All characters are valid digits
+}
 
 
 fn loadProgramFromFile(allocator: *std.mem.Allocator, path: []const u8) !std.ArrayList(Op) {
@@ -497,38 +575,105 @@ fn loadProgramFromFile(allocator: *std.mem.Allocator, path: []const u8) !std.Arr
 
     while (true) {
         const line = try reader.reader().readUntilDelimiterOrEofAlloc(allocator.*, '\n', 255);
-        
-        // if EOF is reached, stop
-        if (line == null) break;
-        
-        const line_start = line.?[0..].ptr; // Pointer to the start of the line
 
-        var tokenizer = std.mem.tokenize(u8, line.?, " \n\t\r");
-        while (tokenizer.next()) |token| {
-            if (token.len >= 2 and std.mem.eql(u8, token[0..2], "//")) {
-                break;
+        // If EOF is reached, stop
+        if (line == null) break;
+
+        const line_slice = line.?[0..];
+        var index: usize = 0;
+        var in_string = false;
+        var current_string = std.ArrayList(u8).init(allocator.*);
+        var token_start_col: usize = 0;
+
+        while (index < line_slice.len) {
+            const c = line_slice[index];
+
+            // Handle comments
+            if (!in_string and index + 1 < line_slice.len and line_slice[index] == '/' and line_slice[index + 1] == '/') {
+                break; // Skip the rest of the line as it's a comment
             }
 
-            // Pointer to the start of the current token 
-            const token_start = token.ptr;
+            if (in_string) {
+                if (c == '"' and (index == 0 or line_slice[index - 1] != '\\')) {
+                    // End of string
+                    in_string = false;
+                    
+                    const complete_string = try current_string.toOwnedSlice();
+                    const col = token_start_col;
+                    const tok = Token.init(complete_string, TokenType.String);
 
-            // We get the column by subtracting the start of the token minus the start of the line + 1 (because the 0th col should be 1)
-            const col = @intFromPtr(token_start) - @intFromPtr(line_start) + 1;
+                    var operation = parseWordAsOperation(tok, line_number, @intCast(col), path);
+                    operation.loc = Location.init(line_number, @intCast(col), path);
+                    try tokens.append(operation);
 
-            const trimmed_token = std.mem.trimLeft(u8, token, " \n\t\r");
-            var operation = parseWordAsOperation(trimmed_token, line_number, @intCast(col), path);
-            
+                    current_string.clearAndFree(); // Reset for the next string
+                } else {
+                    // Handle escape sequences within strings
+                    if (c == '\\' and index + 1 < line_slice.len) {
+                        const next_char = line_slice[index + 1];
+                        switch (next_char) {
+                            '\\' => try current_string.append('\\'),
+                            'n' => try current_string.append('\n'),
+                            't' => try current_string.append('\t'),
+                            '"' => try current_string.append('"'),
+                            else => try current_string.append(c),
+                        }
+                        index += 1; // Skip the next character
+                    } else {
+                        try current_string.append(c);
+                    }
+                }
+            } else if (c == '"') {
+                // Start of string
+                in_string = true;
+                token_start_col = index + 1; // Start column for the string
+            } else if (std.ascii.isWhitespace(c)) {
+                // Handle whitespace as delimiter
+                if (current_string.items.len > 0) {
+                    // Emit the previous token if it exists
+                    const token_str = try current_string.toOwnedSlice();
+                    const col = token_start_col;
+                    var tok = Token.init(token_str, TokenType.Word);
+                    
+                    if (isValidBase10(token_str)) {
+                        tok.type = TokenType.Int;
+                    }
+
+                    var operation = parseWordAsOperation(tok, line_number, @intCast(col), path);
+                    operation.loc = Location.init(line_number, @intCast(col), path);
+                    try tokens.append(operation);
+
+                    current_string.clearAndFree(); // Reset for the next token
+                }
+                token_start_col = index + 1; // Start column for the next token
+            } else {
+                // Append character to the current token
+                try current_string.append(c);
+            }
+
+            index += 1;
+        }
+
+        // If there's any remaining token or string
+        if (current_string.items.len > 0) {
+            const token_str = try current_string.toOwnedSlice();
+            const col = token_start_col;
+            var tok = Token.init(token_str, TokenType.Word);
+
+            if (isValidBase10(token_str)) {
+                tok.type = TokenType.Int;
+            }
+
+            var operation = parseWordAsOperation(tok, line_number, @intCast(col), path);
             operation.loc = Location.init(line_number, @intCast(col), path);
-
             try tokens.append(operation);
         }
-        
+
         line_number += 1;
         allocator.free(line.?);
     }
 
-    return tokens;
-}
+    return tokens;}
 
 
 fn runCommand(command: []const []const u8) !void {

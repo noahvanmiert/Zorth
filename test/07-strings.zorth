@@ -1,0 +1,2 @@
+"Hello, World!\n" 1 1 syscall3
+"Strings work perfectly fine now \"Hello!\" \n" 1 1 syscall3
