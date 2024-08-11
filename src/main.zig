@@ -82,7 +82,8 @@ const Op = struct {
 const TokenType = enum {
     Word,
     Int,
-    String
+    String,
+    Char
 };
 
 
@@ -539,8 +540,12 @@ fn parseWordAsOperation(token: Token, line: i32, col: i32, filepath: []const u8)
         };
 
         return Op.initWithArg(OpType.Push, result, null);
-    } else {
+    } else if (token.type == TokenType.String){
         return Op.initWithArg(OpType.PushStr, null, token.value); 
+    } else { 
+        // character
+        const char = token.value[0]; 
+        return Op.initWithArg(OpType.Push, @as(i32, char), null);
     }
 }
 
@@ -584,6 +589,7 @@ fn loadProgramFromFile(allocator: *std.mem.Allocator, path: []const u8) !std.Arr
         var in_string = false;
         var current_string = std.ArrayList(u8).init(allocator.*);
         var token_start_col: usize = 0;
+        var in_char = false;
 
         while (index < line_slice.len) {
             const c = line_slice[index];
@@ -623,10 +629,54 @@ fn loadProgramFromFile(allocator: *std.mem.Allocator, path: []const u8) !std.Arr
                         try current_string.append(c);
                     }
                 }
+            } else if (in_char) {
+                // '*'
+                if (c != '\'') {
+                    var char_value = c; 
+                    
+                    if (c == '\\') {
+                        const escape = line_slice[index + 1];
+                        switch (escape) {
+                            '\\' => char_value = '\\',
+                            'n' => char_value = '\n',
+                            't' => char_value = '\t',
+                            '\'' => char_value = '\'',
+                            '"' => char_value = '"',
+                            'r' => char_value = '\r',
+                            '0' => char_value = '\x00', // Null character
+                            else => {
+                                print("{s}:{d}:{d}: unrecognized escape sequence '\\{c}'\n", .{path, line_number, token_start_col, escape});
+                            },
+                        }
+
+                        index += 1;
+                    }
+
+                    // Convert the character to a string
+                    const char_string = try std.fmt.allocPrint(std.heap.page_allocator, "{c}", .{char_value});
+
+                    const tok = Token.init(char_string, TokenType.Char);
+
+                    var operation = parseWordAsOperation(tok, line_number, @intCast(token_start_col), path);
+                    operation.loc = Location.init(line_number, @intCast(token_start_col), path);
+                    try tokens.append(operation);
+                    
+                    index += 1; // skip over the last '
+                    in_char = false;
+                    current_string.clearAndFree();
+
+                    if (index < line_slice.len and line_slice[index] != '\'') {
+                        print("{s}:{d}:{d}: character literals may not have more than one character",.{path, line_number, token_start_col});
+                        exit(1);
+                    }
+                }
             } else if (c == '"') {
                 // Start of string
                 in_string = true;
                 token_start_col = index + 1; // Start column for the string
+            } else if (c == '\'' and !in_char) {
+                in_char = true;
+                token_start_col = index + 1;
             } else if (std.ascii.isWhitespace(c)) {
                 // Handle whitespace as delimiter
                 if (current_string.items.len > 0) {
@@ -673,7 +723,8 @@ fn loadProgramFromFile(allocator: *std.mem.Allocator, path: []const u8) !std.Arr
         allocator.free(line.?);
     }
 
-    return tokens;}
+    return tokens;
+}
 
 
 fn runCommand(command: []const []const u8) !void {
@@ -684,7 +735,7 @@ fn runCommand(command: []const []const u8) !void {
     const exit_code = try child.wait();
 
     if (exit_code.Exited != 0) {
-        print("Subprocess failed ({s}) with exit code {?}\n", .{command[0], exit_code});
+        print("Subprocess ({s}) failed with exit code {?}\n", .{command[0], exit_code.Exited});
     }
 }   
 
