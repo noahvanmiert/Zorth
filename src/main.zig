@@ -38,7 +38,9 @@ const OpType = enum {
     Shr,
     Shl,
     Bor,
-    Band
+    Band,
+    Const,
+    Identifier,
 };
 
 
@@ -77,11 +79,6 @@ const TokenType = enum {
 };
 
 
-const Keyword = enum {
-    Const,
-};
-
-
 const Token = struct {
     value: []const u8,
     type: TokenType,
@@ -94,6 +91,43 @@ const Token = struct {
     }
 };
   
+
+const Const = struct {
+    name: []const u8,
+    loc: diagnostics.Location,
+    value: i32,
+
+    fn init(name: []const u8, loc: diagnostics.Location, value: i32) Const {
+        return Const {
+            .name = name,
+            .loc = loc,
+            .value = value
+        };
+    }
+};
+
+
+const Context = struct {
+    const_definitions: std.StringHashMap(Const),
+
+    fn init() Context {
+        return Context {
+            .const_definitions = std.StringHashMap(Const).init(std.heap.page_allocator),
+        };
+    }
+
+    fn deinit(self: *Context) void {
+        self.const_definitions.deinit();
+    }
+
+    fn addConst(self: *Context, name: []const u8, cdef: Const) void {
+        self.const_definitions.put(name, cdef) catch |err| {
+            print("error occured while trying to put value into map: {?}\n", .{err});
+            exit(1);
+        };
+    }
+};
+
 
 fn compile_program(program: std.ArrayList(Op), outFilepath: []const u8) !void { 
     const file = try std.fs.cwd().createFile(
@@ -379,6 +413,14 @@ fn compile_program(program: std.ArrayList(Op), outFilepath: []const u8) !void {
                 try file.writer().print("    push rbx\n", .{});
             },
 
+            OpType.Identifier => {
+
+            },
+
+            OpType.Const => {
+
+            },
+
         }
 
         ip += 1;
@@ -413,10 +455,60 @@ fn compile_program(program: std.ArrayList(Op), outFilepath: []const u8) !void {
 }
 
 
-fn crossreferenceProgram(program: *std.ArrayList(Op)) !void {
+
+
+fn checkNameRedefinition(ctx: Context, name: []const u8, loc: diagnostics.Location) void {
+    if (ctx.const_definitions.get(name)) |c| {
+        diagnostics.compilerError(loc, "redefinition of a constant `{s}`", .{name});
+        diagnostics.compilerNote(c.loc, "the original definition is located here", .{});
+        exit(1);
+    }
+}
+
+
+fn evalConstValue(loc: diagnostics.Location, index: *usize, program: *std.ArrayList(Op)) !i32 {
+    var ip = index.*;
+    
+    var stack = std.ArrayList(i32).init(std.heap.page_allocator);
+    defer stack.deinit();
+
+    while (ip < program.items.len) {
+        const op = program.items[ip];
+
+        if (op.type == OpType.End) {
+            program.items[ip].arg = @intCast(ip + 1);
+            break;
+        }
+
+        else if (op.type == OpType.Push) {
+            try stack.append(op.arg.?);
+        }
+
+        else {
+            diagnostics.compilerError(op.loc, "{} is not supported in compile time evaluation", .{op.type});
+            exit(1);
+        }
+
+        ip += 1;
+    }
+
+    if (stack.items.len != 1) {
+        diagnostics.compilerError(loc, "the result of an expression in compile time evaluation must be a single number", .{});
+        exit(1);
+    }
+
+    index.* = ip;
+
+    return stack.pop();
+}
+
+
+fn crossreferenceProgram(ctxp: *Context, program: *std.ArrayList(Op)) !void {
     var stack = std.ArrayList(usize).init(std.heap.page_allocator);
     defer stack.deinit();
-    
+
+    var ctx = ctxp.*;
+ 
     var ip: usize = 0;
     while (ip < program.items.len) {
         const op = program.items[ip];
@@ -471,6 +563,27 @@ fn crossreferenceProgram(program: *std.ArrayList(Op)) !void {
             const while_ip = stack.pop();
             program.items[ip].arg = @intCast(while_ip);
             try stack.append(ip);
+        } else if (op.type == OpType.Const) {
+            ip += 1; // skip over `const`
+            
+            if (program.items[ip].type != OpType.Identifier) {
+                diagnostics.compilerError(program.items[ip].loc, "expected const name to be TokenType.Word but found {}", .{program.items[ip].type});
+                exit(1);
+            }
+
+            const const_name = program.items[ip].stringArg;
+            const const_location = program.items[ip].loc;
+            ip += 1; // skip over the name
+            checkNameRedefinition(ctx, const_name.?, const_location);
+            const const_value = try evalConstValue(const_location, &ip, program);
+            ctx.addConst(const_name.?, Const.init(const_name.?, const_location, const_value));
+        } else if (op.type == OpType.Identifier) {
+            if (ctx.const_definitions.get(op.stringArg.?)) |cdef| {
+                program.items[ip] = Op.initWithArg(OpType.Push, cdef.value, null);
+            } else {
+                diagnostics.compilerError(op.loc, "unkown word: {s}", .{op.stringArg.?});
+                exit(1);
+            }
         }
     
         ip += 1;
@@ -517,13 +630,12 @@ fn parseWordAsOperation(token: Token, loc: diagnostics.Location) Op {
         mapInsert("shr", OpType.Shr, &map);
         mapInsert("bor", OpType.Bor, &map);
         mapInsert("band", OpType.Band, &map);
+        mapInsert("const", OpType.Const, &map);
     
         if (map.get(token.value)) |op_type| {
             return Op.init(op_type);
         } else {
-
-            diagnostics.compilerError(loc, "Unkown word: {s}", .{token.value});
-            exit(1);
+            return Op.initWithArg(OpType.Identifier, null, token.value); 
         }
         
     } else if (token.type == TokenType.Int) {
@@ -763,7 +875,10 @@ pub fn main() !void {
         var program = try loadProgramFromFile(&allocator, argv[0]);
         defer program.deinit();
 
-        try crossreferenceProgram(&program);
+        var ctx = Context.init();
+        defer ctx.deinit();
+
+        try crossreferenceProgram(&ctx, &program);
         try compile_program(program, "output.asm");
 
         try subprocess.call(&.{"nasm", "-felf64", "output.asm"});
