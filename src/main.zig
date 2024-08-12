@@ -1,5 +1,9 @@
 const std = @import("std");
 
+const diagnostics = @import("diagnostics.zig");
+const subprocessf = @import("subprocess.zig");
+const subprocess = subprocessf.Subprocess;
+
 const print = std.debug.print;
 const exit = std.process.exit;
 
@@ -38,33 +42,19 @@ const OpType = enum {
 };
 
 
-const Location = struct {
-    line: i32,
-    col: i32,
-    filepath: []const u8,
-
-    pub fn init(line: i32, col: i32, filepath: []const u8) Location {
-        return Location {
-            .line = line,
-            .col = col,
-            .filepath = filepath
-        };
-    }
-};
-
 
 const Op = struct {
     type: OpType,
     arg: ?i32,
     stringArg: ?[]const u8,
-    loc: Location,
+    loc: diagnostics.Location,
 
     pub fn init(op_type: OpType) Op {
         return Op {
             .type = op_type,
             .arg = null,
             .stringArg = null,
-            .loc = Location.init(0, 0, "")
+            .loc = diagnostics.Location.init(0, 0, "")
         };
     }
 
@@ -73,7 +63,7 @@ const Op = struct {
             .type = op_type,
             .arg = arg,
             .stringArg = stringArg,
-            .loc = Location.init(0, 0, "")
+            .loc = diagnostics.Location.init(0, 0, "")
         };
     }
 };
@@ -84,6 +74,11 @@ const TokenType = enum {
     Int,
     String,
     Char
+};
+
+
+const Keyword = enum {
+    Const,
 };
 
 
@@ -98,7 +93,7 @@ const Token = struct {
         };
     }
 };
-   
+  
 
 fn compile_program(program: std.ArrayList(Op), outFilepath: []const u8) !void { 
     const file = try std.fs.cwd().createFile(
@@ -263,7 +258,7 @@ fn compile_program(program: std.ArrayList(Op), outFilepath: []const u8) !void {
                 try file.writer().print("    test rax, rax\n", .{});
 
                 if (op.arg == null) {
-                    print("{s}:{d}:{d}: `if` instruction does not have a reference to the end of its block\n", .{op.loc.filepath, op.loc.line, op.loc.col});
+                    diagnostics.compilerError(op.loc, "`if` instruction does not have a reference to the end of its block", .{});
                     exit(1);
                 }
 
@@ -272,7 +267,7 @@ fn compile_program(program: std.ArrayList(Op), outFilepath: []const u8) !void {
 
             OpType.Else => {
                 if (op.arg == null) {
-                    print("{s}:{d}:{d}: `else` instruction does not have a reference to the end of its block\n", .{op.loc.filepath, op.loc.line, op.loc.col});
+                    diagnostics.compilerError(op.loc, "`else` instruction does not have a reference to the end of its block", .{});
                     exit(1);
                 }
                 
@@ -299,7 +294,7 @@ fn compile_program(program: std.ArrayList(Op), outFilepath: []const u8) !void {
 
             OpType.End => {
                 if (op.arg == null) {
-                    print("{s}:{d}:{d}: `end` instruction does not have a reference to the next instruction to jump to\n", .{op.loc.filepath, op.loc.line, op.loc.col});
+                    diagnostics.compilerError(op.loc, "`end` instruction does not have a reference to the next instruction to jump to", .{});
                     exit(1);
                 }
 
@@ -430,14 +425,14 @@ fn crossreferenceProgram(program: *std.ArrayList(Op)) !void {
             try stack.append(ip);
         } else if (op.type == OpType.Else) {
             if (stack.items.len < 1) {
-                print("{s}:{d}:{d}: `else` can only be used with if-blocks\n", .{op.loc.filepath, op.loc.line, op.loc.col});
+                diagnostics.compilerError(op.loc, "`else` can only be used with `if` blocks", .{});
                 exit(1);
             }
 
             const if_ip = stack.pop();
 
             if (program.items[if_ip].type != OpType.If) {
-                print("{s}:{d}:{d}: `else` can only be used with `if` blocks\n", .{op.loc.filepath, op.loc.line, op.loc.col});
+                diagnostics.compilerError(op.loc, "`else` can only be used with `if` block", .{});
                 exit(1);
             }
 
@@ -445,7 +440,7 @@ fn crossreferenceProgram(program: *std.ArrayList(Op)) !void {
             try stack.append(ip);
         } else if (op.type == OpType.End) {
             if (stack.items.len < 1) {
-                print("{s}:{d}:{d}: `else` can only be used with `if` blocks\n", .{op.loc.filepath, op.loc.line, op.loc.col});
+                diagnostics.compilerError(op.loc, "`else` can only be used with `if` blocks", .{});
                 exit(1);
             }
 
@@ -462,14 +457,14 @@ fn crossreferenceProgram(program: *std.ArrayList(Op)) !void {
                 program.items[ip].arg = program.items[block_ip].arg;
                 program.items[block_ip].arg = @intCast(ip + 1);
             } else {
-                print("{s}:{d}:{d}: `end` can only close `if`, `else` and `while` blocks for now\n", .{op.loc.filepath, op.loc.line, op.loc.col});
+                diagnostics.compilerError(op.loc, "`end` can only close `if`, `else` and `while` blocks for now", .{});
                 exit(1);
             }
         } else if (op.type == OpType.While) {
             try stack.append(ip);
         } else if (op.type == OpType.Do) {
             if (stack.items.len < 1) {
-                print("{s}:{d}:{d}: `do` can only be used with `while` blocks\n", .{op.loc.filepath, op.loc.line, op.loc.col});
+                diagnostics.compilerError(op.loc, "`do` can only be used with `while` blocks", .{});
                 exit(1);
             }
 
@@ -492,7 +487,7 @@ fn mapInsert(key: []const u8, value: OpType, map: *std.StringHashMap(OpType)) vo
 }
 
 
-fn parseWordAsOperation(token: Token, line: i32, col: i32, filepath: []const u8) Op {
+fn parseWordAsOperation(token: Token, loc: diagnostics.Location) Op {
     if (token.type == TokenType.Word) { 
         var map = std.StringHashMap(OpType).init(std.heap.page_allocator);
         defer map.deinit();
@@ -526,14 +521,15 @@ fn parseWordAsOperation(token: Token, line: i32, col: i32, filepath: []const u8)
         if (map.get(token.value)) |op_type| {
             return Op.init(op_type);
         } else {
-            print("{s}:{d}:{d}: Unkown word: {s}\n", .{filepath, line, col, token.value});
+
+            diagnostics.compilerError(loc, "Unkown word: {s}", .{token.value});
             exit(1);
         }
         
     } else if (token.type == TokenType.Int) {
         const result = std.fmt.parseInt(i32, token.value, 10) catch |err| {
             if (err == std.fmt.ParseIntError.Overflow) {
-                print("{s}:{d}:{d}: {?}", .{filepath, line, col, err});
+                diagnostics.compilerError(loc, "{?}", .{err});
             }
 
             exit(1);
@@ -608,8 +604,9 @@ fn loadProgramFromFile(allocator: *std.mem.Allocator, path: []const u8) !std.Arr
                     const col = token_start_col;
                     const tok = Token.init(complete_string, TokenType.String);
 
-                    var operation = parseWordAsOperation(tok, line_number, @intCast(col), path);
-                    operation.loc = Location.init(line_number, @intCast(col), path);
+                    const location = diagnostics.Location.init(line_number, @intCast(col), path);
+                    var operation = parseWordAsOperation(tok, location);
+                    operation.loc = location;
                     try tokens.append(operation);
 
                     current_string.clearAndFree(); // Reset for the next string
@@ -645,7 +642,9 @@ fn loadProgramFromFile(allocator: *std.mem.Allocator, path: []const u8) !std.Arr
                             'r' => char_value = '\r',
                             '0' => char_value = '\x00', // Null character
                             else => {
-                                print("{s}:{d}:{d}: unrecognized escape sequence '\\{c}'\n", .{path, line_number, token_start_col, escape});
+                                const location = diagnostics.Location.init(line_number, @intCast(token_start_col), path);
+                                diagnostics.compilerError(location, "unrecognized escape sequence '\\{c}'", .{escape});
+                                exit(1);
                             },
                         }
 
@@ -657,8 +656,9 @@ fn loadProgramFromFile(allocator: *std.mem.Allocator, path: []const u8) !std.Arr
 
                     const tok = Token.init(char_string, TokenType.Char);
 
-                    var operation = parseWordAsOperation(tok, line_number, @intCast(token_start_col), path);
-                    operation.loc = Location.init(line_number, @intCast(token_start_col), path);
+                    const location = diagnostics.Location.init(line_number, @intCast(token_start_col), path);
+                    var operation = parseWordAsOperation(tok, location);
+                    operation.loc = location;
                     try tokens.append(operation);
                     
                     index += 1; // skip over the last '
@@ -666,7 +666,7 @@ fn loadProgramFromFile(allocator: *std.mem.Allocator, path: []const u8) !std.Arr
                     current_string.clearAndFree();
 
                     if (index < line_slice.len and line_slice[index] != '\'') {
-                        print("{s}:{d}:{d}: character literals may not have more than one character",.{path, line_number, token_start_col});
+                        diagnostics.compilerError(location, "character literals may only have one character", .{});
                         exit(1);
                     }
                 }
@@ -682,15 +682,15 @@ fn loadProgramFromFile(allocator: *std.mem.Allocator, path: []const u8) !std.Arr
                 if (current_string.items.len > 0) {
                     // Emit the previous token if it exists
                     const token_str = try current_string.toOwnedSlice();
-                    const col = token_start_col;
                     var tok = Token.init(token_str, TokenType.Word);
                     
                     if (isValidBase10(token_str)) {
                         tok.type = TokenType.Int;
                     }
 
-                    var operation = parseWordAsOperation(tok, line_number, @intCast(col), path);
-                    operation.loc = Location.init(line_number, @intCast(col), path);
+                    const location = diagnostics.Location.init(line_number, @intCast(token_start_col), path);
+                    var operation = parseWordAsOperation(tok, location);
+                    operation.loc = location;
                     try tokens.append(operation);
 
                     current_string.clearAndFree(); // Reset for the next token
@@ -707,15 +707,15 @@ fn loadProgramFromFile(allocator: *std.mem.Allocator, path: []const u8) !std.Arr
         // If there's any remaining token or string
         if (current_string.items.len > 0) {
             const token_str = try current_string.toOwnedSlice();
-            const col = token_start_col;
             var tok = Token.init(token_str, TokenType.Word);
 
             if (isValidBase10(token_str)) {
                 tok.type = TokenType.Int;
             }
 
-            var operation = parseWordAsOperation(tok, line_number, @intCast(col), path);
-            operation.loc = Location.init(line_number, @intCast(col), path);
+            const location = diagnostics.Location.init(line_number, @intCast(token_start_col), path);
+            var operation = parseWordAsOperation(tok, location);
+            operation.loc = location;
             try tokens.append(operation);
         }
 
@@ -725,19 +725,6 @@ fn loadProgramFromFile(allocator: *std.mem.Allocator, path: []const u8) !std.Arr
 
     return tokens;
 }
-
-
-fn runCommand(command: []const []const u8) !void {
-    const allocator = std.heap.page_allocator;
-    var child = std.process.Child.init(command, allocator);
-
-    try child.spawn();
-    const exit_code = try child.wait();
-
-    if (exit_code.Exited != 0) {
-        print("Subprocess ({s}) failed with exit code {?}\n", .{command[0], exit_code.Exited});
-    }
-}   
 
 
 fn usage() void {
@@ -779,8 +766,8 @@ pub fn main() !void {
         try crossreferenceProgram(&program);
         try compile_program(program, "output.asm");
 
-        try runCommand(&.{"nasm", "-felf64", "output.asm"});
-        try runCommand(&.{"ld", "-o", "output", "output.o"});
+        try subprocess.call(&.{"nasm", "-felf64", "output.asm"});
+        try subprocess.call(&.{"ld", "-o", "output", "output.o"});
     } else {
         print("ERROR: unkown subcommand: {s}\n", .{subcommand});
         usage();
