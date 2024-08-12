@@ -41,6 +41,8 @@ const OpType = enum {
     Band,
     Const,
     Identifier,
+    Offset,
+    Reset,
 };
 
 
@@ -109,6 +111,7 @@ const Const = struct {
 
 const Context = struct {
     const_definitions: std.StringHashMap(Const),
+    iota: i64 = 0,
 
     fn init() Context {
         return Context {
@@ -413,14 +416,10 @@ fn compile_program(program: std.ArrayList(Op), outFilepath: []const u8) !void {
                 try file.writer().print("    push rbx\n", .{});
             },
 
-            OpType.Identifier => {
-
-            },
-
-            OpType.Const => {
-
-            },
-
+            OpType.Offset => {},
+            OpType.Reset => {},
+            OpType.Identifier => {},
+            OpType.Const => {},
         }
 
         ip += 1;
@@ -466,9 +465,9 @@ fn checkNameRedefinition(ctx: Context, name: []const u8, loc: diagnostics.Locati
 }
 
 
-fn evalConstValue(loc: diagnostics.Location, index: *usize, program: *std.ArrayList(Op)) !i32 {
-    var ip = index.*;
-    
+fn evalConstValue(ctx: *Context, loc: diagnostics.Location, index: *usize, program: *std.ArrayList(Op)) !i32 {
+    var ip = index.*; 
+
     var stack = std.ArrayList(i32).init(std.heap.page_allocator);
     defer stack.deinit();
 
@@ -482,6 +481,67 @@ fn evalConstValue(loc: diagnostics.Location, index: *usize, program: *std.ArrayL
 
         else if (op.type == OpType.Push) {
             try stack.append(op.arg.?);
+        }
+
+        else if (op.type == OpType.Offset) {
+            try stack.append(@intCast(ctx.iota));
+            ctx.iota += 1;
+        }
+
+        else if (op.type == OpType.Reset) {
+            try stack.append(@intCast(ctx.iota));
+            ctx.iota = 0;
+        }
+
+        else if (op.type == OpType.Plus) {
+            if (stack.items.len < 2) {
+                diagnostics.compilerError(op.loc, "not enough argument for `+` operation", .{});
+                exit(1);
+            }
+
+            const a = stack.pop();
+            const b = stack.pop();
+            try stack.append(a + b);
+        }
+
+        else if (op.type == OpType.Minus) {
+            if (stack.items.len < 2) {
+                diagnostics.compilerError(op.loc, "not enough argument for `-` operation", .{});
+                exit(1);
+            }
+
+            const a = stack.pop();
+            const b = stack.pop();
+            try stack.append(b - a);
+        }
+
+        else if (op.type == OpType.Eq) {
+            if (stack.items.len < 2) {
+                diagnostics.compilerError(op.loc, "not enough argument for `=` operation", .{});
+                exit(1);
+            }
+
+            const a = stack.pop();
+            const b = stack.pop();
+            try stack.append(@intFromBool(a == b));
+        }
+
+        else if (op.type == OpType.Drop) {
+            if (stack.items.len < 1) {
+                diagnostics.compilerError(op.loc, "not enough argument for `drop` operation", .{});
+                exit(1);
+            }
+
+            _ = stack.pop();
+        }
+
+        else if (op.type == OpType.Identifier) {
+            if (ctx.const_definitions.get(op.stringArg.?)) |c| {
+                try stack.append(c.value);
+            } else {
+                diagnostics.compilerError(op.loc, "unsupported word `{s}` in compile time evaluation", .{op.stringArg.?});
+                exit(1);
+            }
         }
 
         else {
@@ -503,11 +563,9 @@ fn evalConstValue(loc: diagnostics.Location, index: *usize, program: *std.ArrayL
 }
 
 
-fn crossreferenceProgram(ctxp: *Context, program: *std.ArrayList(Op)) !void {
+fn crossreferenceProgram(ctx: *Context, program: *std.ArrayList(Op)) !void {
     var stack = std.ArrayList(usize).init(std.heap.page_allocator);
     defer stack.deinit();
-
-    var ctx = ctxp.*;
  
     var ip: usize = 0;
     while (ip < program.items.len) {
@@ -574,11 +632,17 @@ fn crossreferenceProgram(ctxp: *Context, program: *std.ArrayList(Op)) !void {
             const const_name = program.items[ip].stringArg;
             const const_location = program.items[ip].loc;
             ip += 1; // skip over the name
-            checkNameRedefinition(ctx, const_name.?, const_location);
-            const const_value = try evalConstValue(const_location, &ip, program);
-            ctx.addConst(const_name.?, Const.init(const_name.?, const_location, const_value));
+            checkNameRedefinition(ctx.*, const_name.?, const_location);
+            const const_value = try evalConstValue(ctx, const_location, &ip, program);
+            ctx.*.addConst(const_name.?, Const.init(const_name.?, const_location, const_value));
+        } else if (op.type == OpType.Offset) {
+            diagnostics.compilerError(op.loc, "keyword `offset` is only supported in compile time evaluation", .{});
+            exit(1);
+        } else if (op.type == OpType.Reset) {
+            diagnostics.compilerError(op.loc, "keyword `reset` is only supported in compile time evaluation", .{});
+            exit(1);
         } else if (op.type == OpType.Identifier) {
-            if (ctx.const_definitions.get(op.stringArg.?)) |cdef| {
+            if (ctx.*.const_definitions.get(op.stringArg.?)) |cdef| {
                 program.items[ip] = Op.initWithArg(OpType.Push, cdef.value, null);
             } else {
                 diagnostics.compilerError(op.loc, "unkown word: {s}", .{op.stringArg.?});
@@ -631,6 +695,8 @@ fn parseWordAsOperation(token: Token, loc: diagnostics.Location) Op {
         mapInsert("bor", OpType.Bor, &map);
         mapInsert("band", OpType.Band, &map);
         mapInsert("const", OpType.Const, &map);
+        mapInsert("offset", OpType.Offset, &map);
+        mapInsert("reset", OpType.Reset, &map);
     
         if (map.get(token.value)) |op_type| {
             return Op.init(op_type);
