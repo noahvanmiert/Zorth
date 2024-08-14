@@ -9,11 +9,13 @@ const exit = std.process.exit;
 
 const Globals = enum(i32) {
     MemoryCapacity = 640000,
+    ReturnStackCapacity = 4096,
 };
 
 const OpType = enum {
     Push,
     PushStr,
+    Str,
     Plus,
     Minus,
     Eq,
@@ -43,6 +45,11 @@ const OpType = enum {
     Identifier,
     Offset,
     Reset,
+    Include,
+    Proc,
+    In,
+    Call,
+    Return,
 };
 
 
@@ -109,22 +116,50 @@ const Const = struct {
 };
 
 
+const Proc = struct {
+    name: []const u8,
+    loc: diagnostics.Location,
+    addr: usize,
+    body_size: usize,
+
+    fn init(name: []const u8, loc: diagnostics.Location, addr: usize, body_size: usize) Proc {
+        return Proc {
+            .name = name,
+            .loc = loc,
+            .addr = addr,
+            .body_size = body_size
+        };
+    }
+};
+
+
 const Context = struct {
     const_definitions: std.StringHashMap(Const),
+    proc_definitions: std.StringHashMap(Proc),
     iota: i64 = 0,
+    current_proc: ?Proc = null,
 
     fn init() Context {
         return Context {
             .const_definitions = std.StringHashMap(Const).init(std.heap.page_allocator),
+            .proc_definitions = std.StringHashMap(Proc).init(std.heap.page_allocator),
         };
     }
 
     fn deinit(self: *Context) void {
         self.const_definitions.deinit();
+        self.proc_definitions.deinit();
     }
 
     fn addConst(self: *Context, name: []const u8, cdef: Const) void {
         self.const_definitions.put(name, cdef) catch |err| {
+            print("error occured while trying to put value into map: {?}\n", .{err});
+            exit(1);
+        };
+    }
+
+    fn addProc(self: *Context, name: []const u8, proc: Proc) void {
+        self.proc_definitions.put(name, proc) catch |err| {
             print("error occured while trying to put value into map: {?}\n", .{err});
             exit(1);
         };
@@ -176,6 +211,8 @@ fn compile_program(program: std.ArrayList(Op), outFilepath: []const u8) !void {
     try file.writer().print("    ret\n", .{});
     _ = try file.write("global _start\n");
     _ = try file.write("_start:\n");
+    _ = try file.write("    mov rax, ret_stack_end\n");
+    _ = try file.write("    mov [ret_stack_rsp], rax\n");
 
     var strings = std.ArrayList([]const u8).init(std.heap.page_allocator);
     defer strings.deinit();
@@ -183,7 +220,7 @@ fn compile_program(program: std.ArrayList(Op), outFilepath: []const u8) !void {
     var ip: usize = 0;
     while (ip < program.items.len) {
         const op = program.items[ip];
-        
+ 
         try file.writer().print("addr_{}:\n", .{ip});
         switch (op.type) {
             OpType.Push => {
@@ -416,10 +453,39 @@ fn compile_program(program: std.ArrayList(Op), outFilepath: []const u8) !void {
                 try file.writer().print("    push rbx\n", .{});
             },
 
+            OpType.Proc => {
+                try file.writer().print("    ;; -- proc --\n", .{});
+                try file.writer().print("    jmp addr_{d}\n", .{op.arg.?}); 
+            },
+
+            OpType.In => {
+                try file.writer().print("    ;; -- proc (in) --\n", .{});
+                try file.writer().print("    mov [ret_stack_rsp], rsp\n", .{}); 
+                try file.writer().print("    mov rsp, rax\n", .{}); 
+            },
+
+            OpType.Call => {
+                try file.writer().print("    ;; -- call --\n", .{});
+                try file.writer().print("    mov rax, rsp\n", .{}); 
+                try file.writer().print("    mov rsp, [ret_stack_rsp]\n", .{});
+                try file.writer().print("    call addr_{}\n", .{op.arg.?});
+                try file.writer().print("    mov [ret_stack_rsp], rsp\n", .{});
+                try file.writer().print("    mov rsp, rax\n", .{});
+            },
+
+            OpType.Return => {
+                try file.writer().print("    ;; -- return --\n", .{});
+                try file.writer().print("    mov rax, rsp\n", .{}); 
+                try file.writer().print("    mov rsp, [ret_stack_rsp]\n", .{}); 
+                try file.writer().print("    ret\n", .{}); 
+            },
+
             OpType.Offset => {},
             OpType.Reset => {},
             OpType.Identifier => {},
             OpType.Const => {},
+            OpType.Str => {},
+            OpType.Include => {},
         }
 
         ip += 1;
@@ -450,6 +516,9 @@ fn compile_program(program: std.ArrayList(Op), outFilepath: []const u8) !void {
     }
 
     _ = try file.write("segment .bss\n");
+    try file.writer().print("ret_stack_rsp: resq 1\n", .{});
+    try file.writer().print("ret_stack: resb {d}\n", .{@intFromEnum(Globals.ReturnStackCapacity)});
+    try file.writer().print("ret_stack_end: resq 1\n", .{});
     try file.writer().print("mem: resb {d}\n", .{@intFromEnum(Globals.MemoryCapacity)});
 }
 
@@ -460,6 +529,12 @@ fn checkNameRedefinition(ctx: Context, name: []const u8, loc: diagnostics.Locati
     if (ctx.const_definitions.get(name)) |c| {
         diagnostics.compilerError(loc, "redefinition of a constant `{s}`", .{name});
         diagnostics.compilerNote(c.loc, "the original definition is located here", .{});
+        exit(1);
+    }
+
+    if (ctx.proc_definitions.get(name)) |proc| {
+        diagnostics.compilerError(loc, "redefinition of a procedure `{s}`", .{name});
+        diagnostics.compilerNote(proc.loc, "the original definition is located here", .{});
         exit(1);
     }
 }
@@ -563,7 +638,7 @@ fn evalConstValue(ctx: *Context, loc: diagnostics.Location, index: *usize, progr
 }
 
 
-fn crossreferenceProgram(ctx: *Context, program: *std.ArrayList(Op)) !void {
+fn processProgram(ctx: *Context, program: *std.ArrayList(Op)) !void {
     var stack = std.ArrayList(usize).init(std.heap.page_allocator);
     defer stack.deinit();
  
@@ -573,7 +648,9 @@ fn crossreferenceProgram(ctx: *Context, program: *std.ArrayList(Op)) !void {
 
         if (op.type == OpType.If) {
             try stack.append(ip);
-        } else if (op.type == OpType.Else) {
+        } 
+
+        else if (op.type == OpType.Else) {
             if (stack.items.len < 1) {
                 diagnostics.compilerError(op.loc, "`else` can only be used with `if` blocks", .{});
                 exit(1);
@@ -588,9 +665,11 @@ fn crossreferenceProgram(ctx: *Context, program: *std.ArrayList(Op)) !void {
 
             program.items[if_ip].arg = @intCast(ip + 1);
             try stack.append(ip);
-        } else if (op.type == OpType.End) {
+        } 
+
+        else if (op.type == OpType.End) {
             if (stack.items.len < 1) {
-                diagnostics.compilerError(op.loc, "`else` can only be used with `if` blocks", .{});
+                diagnostics.compilerError(op.loc, "`end` can only close `if`, `else`, `while`, `const` and `proc` blocks for now", .{});
                 exit(1);
             }
 
@@ -599,6 +678,7 @@ fn crossreferenceProgram(ctx: *Context, program: *std.ArrayList(Op)) !void {
             if (program.items[block_ip].type == OpType.If or program.items[block_ip].type == OpType.Else)  {
                 program.items[block_ip].arg = @intCast(ip);
                 program.items[ip].arg = @intCast(ip + 1);
+
             } else if (program.items[block_ip].type == OpType.Do) {
                  if (program.items[block_ip].arg == null) {
                      std.debug.assert(false);
@@ -606,13 +686,25 @@ fn crossreferenceProgram(ctx: *Context, program: *std.ArrayList(Op)) !void {
                 
                 program.items[ip].arg = program.items[block_ip].arg;
                 program.items[block_ip].arg = @intCast(ip + 1);
+
+            } else if (program.items[block_ip].type == OpType.Proc) { 
+                program.items[block_ip].arg = @intCast(ip + 1);
+                program.items[ip].type = OpType.Return;
+                ctx.current_proc = null;
+
             } else {
-                diagnostics.compilerError(op.loc, "`end` can only close `if`, `else` and `while` blocks for now", .{});
+                // NOTE: const handles `end` by itself. 
+
+                diagnostics.compilerError(op.loc, "`end` can only close `if`, `else`, `while`, `const` and `proc` blocks for now", .{});
                 exit(1);
             }
-        } else if (op.type == OpType.While) {
+        } 
+
+        else if (op.type == OpType.While) {
             try stack.append(ip);
-        } else if (op.type == OpType.Do) {
+        } 
+
+        else if (op.type == OpType.Do) {
             if (stack.items.len < 1) {
                 diagnostics.compilerError(op.loc, "`do` can only be used with `while` blocks", .{});
                 exit(1);
@@ -621,11 +713,13 @@ fn crossreferenceProgram(ctx: *Context, program: *std.ArrayList(Op)) !void {
             const while_ip = stack.pop();
             program.items[ip].arg = @intCast(while_ip);
             try stack.append(ip);
-        } else if (op.type == OpType.Const) {
+        } 
+
+        else if (op.type == OpType.Const) {
             ip += 1; // skip over `const`
             
             if (program.items[ip].type != OpType.Identifier) {
-                diagnostics.compilerError(program.items[ip].loc, "expected const name to be TokenType.Word but found {}", .{program.items[ip].type});
+                diagnostics.compilerError(program.items[ip].loc, "expected const name to be {} but found {}", .{OpType.Identifier, program.items[ip].type});
                 exit(1);
             }
 
@@ -635,15 +729,86 @@ fn crossreferenceProgram(ctx: *Context, program: *std.ArrayList(Op)) !void {
             checkNameRedefinition(ctx.*, const_name.?, const_location);
             const const_value = try evalConstValue(ctx, const_location, &ip, program);
             ctx.*.addConst(const_name.?, Const.init(const_name.?, const_location, const_value));
-        } else if (op.type == OpType.Offset) {
+        } 
+
+        else if (op.type == OpType.Proc) {
+            // proc write in 1 syscall3 end
+            
+            if (ctx.current_proc != null) {
+                diagnostics.compilerError(op.loc, "defining procedures inside of procedures is not allowed", .{});
+                diagnostics.compilerNote(ctx.current_proc.?.loc, "the current procedure start here", .{});
+                exit(1);
+            }
+
+            try stack.append(ip);
+
+            ip += 1;
+            if (ip >= program.items.len) {
+                diagnostics.compilerError(op.loc, "expected procedure name but found nothing", .{});
+                exit(1);
+            }
+
+            if (program.items[ip].type != OpType.Identifier) {
+                diagnostics.compilerError(program.items[ip].loc, "expected procedure name to be {} but found {}", .{OpType.Identifier, program.items[ip].type});
+                exit(1);
+            } 
+
+            const proc_name = program.items[ip].stringArg.?;
+            const proc_loc = program.items[ip].loc;
+            checkNameRedefinition(ctx.*, proc_name, program.items[ip].loc);
+
+            ip += 1;
+            if (ip >= program.items.len) {
+                diagnostics.compilerError(op.loc, "expected keyword `in` but found nothing", .{});
+                exit(1);
+            }
+
+            if (program.items[ip].type != OpType.In) {
+                diagnostics.compilerError(program.items[ip].loc, "expected keyword `in` but found token of type {}", .{program.items[ip].type});
+                exit(1);
+            }
+
+            const proc = Proc.init(proc_name, proc_loc, ip, 0);
+            ctx.addProc(proc_name, proc);
+            ctx.current_proc = proc;
+        }
+    
+        else if (op.type == OpType.Offset) {
             diagnostics.compilerError(op.loc, "keyword `offset` is only supported in compile time evaluation", .{});
             exit(1);
-        } else if (op.type == OpType.Reset) {
+        } 
+
+        else if (op.type == OpType.Reset) {
             diagnostics.compilerError(op.loc, "keyword `reset` is only supported in compile time evaluation", .{});
             exit(1);
-        } else if (op.type == OpType.Identifier) {
-            if (ctx.*.const_definitions.get(op.stringArg.?)) |cdef| {
+        } 
+
+        else if (op.type == OpType.Include) {
+            ip += 1; // skip over `include`
+
+            if (program.items[ip].type != OpType.Str) {
+                diagnostics.compilerError(op.loc, "expected path to the include file to be of type main.OpType.Str but found {}", .{program.items[ip].type});
+                exit(1);
+            }
+
+            var allocator = std.heap.page_allocator; 
+            var included_program = try loadProgramFromFile(&allocator, program.items[ip].stringArg.?);
+            defer included_program.deinit();
+
+            try program.insertSlice(ip + 1, included_program.items);
+        }
+
+        else if (op.type == OpType.Str) {
+            program.items[ip].type = OpType.PushStr;
+        }
+
+        else if (op.type == OpType.Identifier) {
+            if (ctx.const_definitions.get(op.stringArg.?)) |cdef| {
                 program.items[ip] = Op.initWithArg(OpType.Push, cdef.value, null);
+
+            } else if (ctx.proc_definitions.get(op.stringArg.?)) |proc| {
+                program.items[ip] = Op.initWithArg(OpType.Call, @intCast(proc.addr), null);
+
             } else {
                 diagnostics.compilerError(op.loc, "unkown word: {s}", .{op.stringArg.?});
                 exit(1);
@@ -697,6 +862,9 @@ fn parseWordAsOperation(token: Token, loc: diagnostics.Location) Op {
         mapInsert("const", OpType.Const, &map);
         mapInsert("offset", OpType.Offset, &map);
         mapInsert("reset", OpType.Reset, &map);
+        mapInsert("include", OpType.Include, &map);
+        mapInsert("proc", OpType.Proc, &map);
+        mapInsert("in", OpType.In, &map);
     
         if (map.get(token.value)) |op_type| {
             return Op.init(op_type);
@@ -715,7 +883,7 @@ fn parseWordAsOperation(token: Token, loc: diagnostics.Location) Op {
 
         return Op.initWithArg(OpType.Push, result, null);
     } else if (token.type == TokenType.String){
-        return Op.initWithArg(OpType.PushStr, null, token.value); 
+        return Op.initWithArg(OpType.Str, null, token.value); 
     } else { 
         // character
         const char = token.value[0]; 
@@ -944,7 +1112,7 @@ pub fn main() !void {
         var ctx = Context.init();
         defer ctx.deinit();
 
-        try crossreferenceProgram(&ctx, &program);
+        try processProgram(&ctx, &program);
         try compile_program(program, "output.asm");
 
         try subprocess.call(&.{"nasm", "-felf64", "output.asm"});

@@ -1,13 +1,12 @@
 // Made by Noah Van Miert
 
-const A offset end
-const B offset end
-const C offset end
-const D reset end
-const K offset end
+include "std/std.zorth"
 
-A dump
-B dump
-C dump
-D dump
-K dump
+proc print in 
+	10 while dup 0 > do
+		"Hello, World!\n" puts
+		1 -
+	end
+end
+
+print

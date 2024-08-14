@@ -1,0 +1,7 @@
+proc one in 
+	1 
+end
+
+one dump
+
+// expected 1

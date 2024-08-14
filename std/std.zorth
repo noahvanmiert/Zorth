@@ -1,0 +1,26 @@
+//  Copyright (c) Noah Van Miert 2024
+//  Licensed under the MIT license. Use at your own risk!
+//  12/08/2024 
+//
+//  std/std.zorth -- Standard library for Zorth
+
+
+include "std/linux.zorth"
+
+const std.stdin  0 end
+const std.stdout 1 end
+const std.stderr 2 end
+
+
+// @param: size ptr
+proc puts in 
+	std.stdout 			// fd
+	std.syscall.write	// call write syscall
+end
+
+
+// @param: size ptr 
+proc eputs in 
+	std.stderr          // fd
+	std.syscall.write   // call write syscall 
+end
