@@ -1,0 +1,9 @@
+const sizeof(u8) 1  end 
+
+memory A sizeof(u8) end
+memory B sizeof(u8) end
+
+A 'N' store8 
+A load8 dump
+
+B load8 dump

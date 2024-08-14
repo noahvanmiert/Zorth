@@ -50,6 +50,7 @@ const OpType = enum {
     In,
     Call,
     Return,
+    Memory,
 };
 
 
@@ -133,22 +134,43 @@ const Proc = struct {
 };
 
 
+const Memory = struct {
+    name: []const u8,
+    size: usize,
+    offset: usize,
+    loc: diagnostics.Location,
+
+    fn init(name: []const u8, size: usize, offset: usize, loc: diagnostics.Location) Memory {
+        return Memory {
+            .name = name,
+            .size = size,
+            .offset = offset,
+            .loc = loc
+        };
+    }
+};
+
+
 const Context = struct {
     const_definitions: std.StringHashMap(Const),
     proc_definitions: std.StringHashMap(Proc),
+    memory_definitions: std.StringHashMap(Memory),
     iota: i64 = 0,
     current_proc: ?Proc = null,
+    memory_offset: usize = 0,
 
     fn init() Context {
         return Context {
             .const_definitions = std.StringHashMap(Const).init(std.heap.page_allocator),
             .proc_definitions = std.StringHashMap(Proc).init(std.heap.page_allocator),
+            .memory_definitions = std.StringHashMap(Memory).init(std.heap.page_allocator),
         };
     }
 
     fn deinit(self: *Context) void {
         self.const_definitions.deinit();
         self.proc_definitions.deinit();
+        self.memory_definitions.deinit();
     }
 
     fn addConst(self: *Context, name: []const u8, cdef: Const) void {
@@ -160,6 +182,13 @@ const Context = struct {
 
     fn addProc(self: *Context, name: []const u8, proc: Proc) void {
         self.proc_definitions.put(name, proc) catch |err| {
+            print("error occured while trying to put value into map: {?}\n", .{err});
+            exit(1);
+        };
+    }
+
+    fn addMemory(self: *Context, name: []const u8, mem: Memory) void {
+        self.memory_definitions.put(name, mem) catch |err| {
             print("error occured while trying to put value into map: {?}\n", .{err});
             exit(1);
         };
@@ -380,7 +409,9 @@ fn compile_program(program: std.ArrayList(Op), outFilepath: []const u8) !void {
 
             OpType.Mem => {
                 try file.writer().print("    ;; -- mem --\n", .{});
-                try file.writer().print("    push mem\n", .{});
+                try file.writer().print("    mov rax, mem\n", .{});
+                try file.writer().print("    add rax, {d}\n", .{op.arg.?});
+                try file.writer().print("    push rax\n", .{});
              },
 
             OpType.Dump => {
@@ -418,7 +449,6 @@ fn compile_program(program: std.ArrayList(Op), outFilepath: []const u8) !void {
                 try file.writer().print("    pop rsi\n", .{});
                 try file.writer().print("    pop rdx\n", .{});
                 try file.writer().print("    syscall\n", .{});
-                
             },
 
             OpType.Shr => {
@@ -480,6 +510,10 @@ fn compile_program(program: std.ArrayList(Op), outFilepath: []const u8) !void {
                 try file.writer().print("    ret\n", .{}); 
             },
 
+            OpType.Memory => {
+
+            },
+
             OpType.Offset => {},
             OpType.Reset => {},
             OpType.Identifier => {},
@@ -523,8 +557,6 @@ fn compile_program(program: std.ArrayList(Op), outFilepath: []const u8) !void {
 }
 
 
-
-
 fn checkNameRedefinition(ctx: Context, name: []const u8, loc: diagnostics.Location) void {
     if (ctx.const_definitions.get(name)) |c| {
         diagnostics.compilerError(loc, "redefinition of a constant `{s}`", .{name});
@@ -535,6 +567,12 @@ fn checkNameRedefinition(ctx: Context, name: []const u8, loc: diagnostics.Locati
     if (ctx.proc_definitions.get(name)) |proc| {
         diagnostics.compilerError(loc, "redefinition of a procedure `{s}`", .{name});
         diagnostics.compilerNote(proc.loc, "the original definition is located here", .{});
+        exit(1);
+    }
+
+    if (ctx.memory_definitions.get(name)) |mem| {
+        diagnostics.compilerError(loc, "redefinition of a memory region `{s}`", .{name});
+        diagnostics.compilerNote(mem.loc, "the original definition is located here", .{});
         exit(1);
     }
 }
@@ -732,8 +770,6 @@ fn processProgram(ctx: *Context, program: *std.ArrayList(Op)) !void {
         } 
 
         else if (op.type == OpType.Proc) {
-            // proc write in 1 syscall3 end
-            
             if (ctx.current_proc != null) {
                 diagnostics.compilerError(op.loc, "defining procedures inside of procedures is not allowed", .{});
                 diagnostics.compilerNote(ctx.current_proc.?.loc, "the current procedure start here", .{});
@@ -749,7 +785,9 @@ fn processProgram(ctx: *Context, program: *std.ArrayList(Op)) !void {
             }
 
             if (program.items[ip].type != OpType.Identifier) {
-                diagnostics.compilerError(program.items[ip].loc, "expected procedure name to be {} but found {}", .{OpType.Identifier, program.items[ip].type});
+                diagnostics.compilerError(program.items[ip].loc, 
+                    "expected procedure name to be {} but found {}", .{OpType.Identifier, program.items[ip].type}
+                );
                 exit(1);
             } 
 
@@ -798,6 +836,35 @@ fn processProgram(ctx: *Context, program: *std.ArrayList(Op)) !void {
             try program.insertSlice(ip + 1, included_program.items);
         }
 
+        else if (op.type == OpType.Memory) {
+            ip += 1; // skip over `memory` keyword 
+            if (ip >= program.items.len) {
+                diagnostics.compilerError(op.loc, "expected memory name but found nothing", .{});
+                exit(1);
+            }
+
+            if (program.items[ip].type != OpType.Identifier) {
+                diagnostics.compilerError(
+                    program.items[ip].loc, "expected memory name to be of type {} but found {}", .{OpType.Identifier, program.items[ip].type}
+                );
+                exit(1);
+            }
+
+            const memory_name = program.items[ip].stringArg.?;
+            checkNameRedefinition(ctx.*, memory_name, program.items[ip].loc);
+            ip += 1;
+
+            if (ip >= program.items.len) {
+                diagnostics.compilerError(program.items[ip].loc, "expected memory size but found nothing", .{});
+                exit(1);
+            }
+
+            const memory_size = try evalConstValue(ctx, program.items[ip].loc, &ip, program);
+            const memory_offset = ctx.memory_offset;
+            ctx.memory_offset += @intCast(memory_size); // TODO: everything should be usize 
+            ctx.addMemory(memory_name, Memory.init(memory_name, @intCast(memory_size), memory_offset, op.loc));
+        }
+
         else if (op.type == OpType.Str) {
             program.items[ip].type = OpType.PushStr;
         }
@@ -809,6 +876,8 @@ fn processProgram(ctx: *Context, program: *std.ArrayList(Op)) !void {
             } else if (ctx.proc_definitions.get(op.stringArg.?)) |proc| {
                 program.items[ip] = Op.initWithArg(OpType.Call, @intCast(proc.addr), null);
 
+            } else if (ctx.memory_definitions.get(op.stringArg.?)) |mem| {
+                program.items[ip] = Op.initWithArg(OpType.Mem, @intCast(mem.offset), null);
             } else {
                 diagnostics.compilerError(op.loc, "unkown word: {s}", .{op.stringArg.?});
                 exit(1);
@@ -850,7 +919,6 @@ fn parseWordAsOperation(token: Token, loc: diagnostics.Location) Op {
         mapInsert("while", OpType.While, &map);
         mapInsert("do", OpType.Do, &map);
         mapInsert("end", OpType.End, &map);
-        mapInsert("mem", OpType.Mem, &map);
         mapInsert("load8", OpType.Load, &map);
         mapInsert("store8", OpType.Store, &map);
         mapInsert("syscall1", OpType.Syscall1, &map);
@@ -865,6 +933,7 @@ fn parseWordAsOperation(token: Token, loc: diagnostics.Location) Op {
         mapInsert("include", OpType.Include, &map);
         mapInsert("proc", OpType.Proc, &map);
         mapInsert("in", OpType.In, &map);
+        mapInsert("memory", OpType.Memory, &map);
     
         if (map.get(token.value)) |op_type| {
             return Op.init(op_type);
