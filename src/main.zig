@@ -1,8 +1,22 @@
+//  Copyright (c) Noah Van Miert 2024
+//  Licensed under the MIT license. Use at your own risk!
+//  12/08/2024 
+
 const std = @import("std");
 
 const diagnostics = @import("diagnostics.zig");
-const subprocessf = @import("subprocess.zig");
-const subprocess = subprocessf.Subprocess;
+const subprocessModule = @import("subprocess.zig");
+const tokenModule = @import("token.zig");
+const operationModule = @import("operation.zig");
+const utils = @import("utils.zig");
+
+const subprocess = subprocessModule.Subprocess;
+
+const TokenType = tokenModule.TokenType;
+const Token = tokenModule.Token;
+
+const OpType = operationModule.OpType;
+const Op = operationModule.Op;
 
 const print = std.debug.print;
 const exit = std.process.exit;
@@ -12,95 +26,6 @@ const Globals = enum(i32) {
     ReturnStackCapacity = 4096,
 };
 
-const OpType = enum {
-    Push,
-    PushStr,
-    Str,
-    Plus,
-    Minus,
-    Eq,
-    Dup,
-    Dup2,
-    Drop,
-    Swap,
-    Over,
-    Gt,
-    St,
-    Dump,
-    If,
-    Else,
-    While,
-    Do,
-    End,
-    Mem,
-    Load,   // 1 byte 
-    Store,   // 1 byte
-    Syscall1,
-    Syscall3,
-    Shr,
-    Shl,
-    Bor,
-    Band,
-    Const,
-    Identifier,
-    Offset,
-    Reset,
-    Include,
-    Proc,
-    In,
-    Call,
-    Return,
-    Memory,
-};
-
-
-
-const Op = struct {
-    type: OpType,
-    arg: ?i32,
-    stringArg: ?[]const u8,
-    loc: diagnostics.Location,
-
-    pub fn init(op_type: OpType) Op {
-        return Op {
-            .type = op_type,
-            .arg = null,
-            .stringArg = null,
-            .loc = diagnostics.Location.init(0, 0, "")
-        };
-    }
-
-    pub fn initWithArg(op_type: OpType, arg: ?i32, stringArg: ?[]const u8) Op {
-        return Op {
-            .type = op_type,
-            .arg = arg,
-            .stringArg = stringArg,
-            .loc = diagnostics.Location.init(0, 0, "")
-        };
-    }
-};
-
-
-const TokenType = enum {
-    Word,
-    Int,
-    String,
-    Char
-};
-
-
-const Token = struct {
-    value: []const u8,
-    type: TokenType,
-
-    fn init(value: []const u8, _type: TokenType) Token {
-        return Token {
-            .value = value,
-            .type = _type,
-        };
-    }
-};
-  
 
 const Const = struct {
     name: []const u8,
@@ -510,23 +435,13 @@ fn compile_program(program: std.ArrayList(Op), outFilepath: []const u8) !void {
                 try file.writer().print("    ret\n", .{}); 
             },
 
-            OpType.Memory => {
-
-            },
-
-            OpType.Offset => {},
-            OpType.Reset => {},
-            OpType.Identifier => {},
-            OpType.Const => {},
-            OpType.Str => {},
-            OpType.Include => {},
+            else => {}
         }
 
         ip += 1;
     }
     
     try file.writer().print("addr_{}:\n", .{program.items.len});
-    _ = try file.write("    ;; exit with non-zero exit code\n");
     _ = try file.write("    mov rax, 60\n");
     _ = try file.write("    mov rdi, 0\n");
     _ = try file.write("    syscall\n");
@@ -557,120 +472,150 @@ fn compile_program(program: std.ArrayList(Op), outFilepath: []const u8) !void {
 }
 
 
-fn checkNameRedefinition(ctx: Context, name: []const u8, loc: diagnostics.Location) void {
-    if (ctx.const_definitions.get(name)) |c| {
-        diagnostics.compilerError(loc, "redefinition of a constant `{s}`", .{name});
-        diagnostics.compilerNote(c.loc, "the original definition is located here", .{});
-        exit(1);
-    }
-
-    if (ctx.proc_definitions.get(name)) |proc| {
-        diagnostics.compilerError(loc, "redefinition of a procedure `{s}`", .{name});
-        diagnostics.compilerNote(proc.loc, "the original definition is located here", .{});
-        exit(1);
-    }
-
-    if (ctx.memory_definitions.get(name)) |mem| {
-        diagnostics.compilerError(loc, "redefinition of a memory region `{s}`", .{name});
-        diagnostics.compilerNote(mem.loc, "the original definition is located here", .{});
+fn checkRedefinition(name: []const u8, loc: diagnostics.Location, entity: anytype, entity_type: []const u8) void {
+    if (entity) |e| {
+        diagnostics.compilerError(loc, "redefinition of a {s} `{s}`", .{entity_type, name});
+        diagnostics.compilerNote(e.loc, "the original definition is located here", .{});
         exit(1);
     }
 }
 
 
-fn evalConstValue(ctx: *Context, loc: diagnostics.Location, index: *usize, program: *std.ArrayList(Op)) !i32 {
-    var ip = index.*; 
+fn checkNameRedefinition(ctx: *Context, name: []const u8, loc: diagnostics.Location) void {
+    checkRedefinition(name, loc, ctx.const_definitions.get(name), "constant");
+    checkRedefinition(name, loc, ctx.proc_definitions.get(name), "procedure");
+    checkRedefinition(name, loc, ctx.memory_definitions.get(name), "memory region");
+}
+
+
+fn evalConstValue(ctx: *Context, loc: diagnostics.Location, index: *usize, tokens: *const std.ArrayList(Token)) !i32 {
+    var i = index.*; 
 
     var stack = std.ArrayList(i32).init(std.heap.page_allocator);
     defer stack.deinit();
 
-    while (ip < program.items.len) {
-        const op = program.items[ip];
+    while (i < tokens.items.len) {
+        const token = tokens.items[i];
+        
+        switch (token.type) {
+            .Intrinsic => {
+                const op_type = utils.getIntrinsicType(token.value);
 
-        if (op.type == OpType.End) {
-            program.items[ip].arg = @intCast(ip + 1);
-            break;
-        }
+                switch (op_type) {
+                    .Plus => {
+                        if (stack.items.len < 2) {
+                            diagnostics.compilerError(token.location, "not enough argument for `+` operation", .{});
+                            exit(1);
+                        }
 
-        else if (op.type == OpType.Push) {
-            try stack.append(op.arg.?);
-        }
+                        const a = stack.pop();
+                        const b = stack.pop();
+                        try stack.append(a + b);
+                    },
 
-        else if (op.type == OpType.Offset) {
-            try stack.append(@intCast(ctx.iota));
-            ctx.iota += 1;
-        }
+                    .Minus => {
+                        if (stack.items.len < 2) {
+                            diagnostics.compilerError(token.location, "not enough argument for `-` operation", .{});
+                            exit(1);
+                        }
 
-        else if (op.type == OpType.Reset) {
-            try stack.append(@intCast(ctx.iota));
-            ctx.iota = 0;
-        }
+                        const a = stack.pop();
+                        const b = stack.pop();
+                        try stack.append(b - a);
+                    },
 
-        else if (op.type == OpType.Plus) {
-            if (stack.items.len < 2) {
-                diagnostics.compilerError(op.loc, "not enough argument for `+` operation", .{});
+                    .Eq => {
+                        if (stack.items.len < 2) {
+                            diagnostics.compilerError(token.location, "not enough argument for `=` operation", .{});
+                            exit(1);
+                        }
+
+                        const a = stack.pop();
+                        const b = stack.pop();
+                        try stack.append(@intFromBool(a == b));
+                    },
+
+                    .Drop => {
+                        if (stack.items.len < 1) {
+                            diagnostics.compilerError(token.location, "not enough argument for `drop` operation", .{});
+                            exit(1);
+                        }
+
+                        _ = stack.pop();
+                    },
+
+                    else => {
+                        diagnostics.compilerError(token.location, "{} is unsupported in compile time evaluation", .{op_type});
+                        exit(1);
+                    }
+                }   
+            },
+
+            .Keyword => {
+                const op_type = utils.getKeywordType(token.value);
+
+                switch (op_type) {
+                    .End => {
+                        i += 1; // so we skip over `end`
+                        break;
+                    },
+ 
+                    .Offset => {
+                        try stack.append(@intCast(ctx.iota));
+                        ctx.iota += 1;
+                    },
+
+                    .Reset => {
+                        try stack.append(@intCast(ctx.iota));
+                        ctx.iota = 0;
+                    },
+
+                    else => {
+                        diagnostics.compilerError(token.location, "{} is unsupported in compile time evaluation", .{op_type});
+                        exit(1);
+                    }
+                }
+            },
+
+            .Number => {
+                const result = std.fmt.parseInt(i32, token.value, 10) catch |err| {
+                    diagnostics.compilerError(token.location, "{}", .{err});
+                    exit(1);
+                };
+                
+                try stack.append(result);
+            },
+
+            .Character => {
+                const char = token.value[0];
+                try stack.append(@as(i32, char));
+            },
+
+            .Word => {
+                if (!ctx.const_definitions.contains(token.value)) {
+                    diagnostics.compilerError(token.location, "unsupported word `{s}` in compile time evaluation", .{token.value});
+                    exit(1);
+                }
+
+                try stack.append(ctx.const_definitions.get(token.value).?.value);
+            },
+            
+            else => {
+                diagnostics.compilerError(token.location, "unsupported token `{}` in compile time evaluation", .{token.type});
                 exit(1);
             }
-
-            const a = stack.pop();
-            const b = stack.pop();
-            try stack.append(a + b);
         }
 
-        else if (op.type == OpType.Minus) {
-            if (stack.items.len < 2) {
-                diagnostics.compilerError(op.loc, "not enough argument for `-` operation", .{});
-                exit(1);
-            }
-
-            const a = stack.pop();
-            const b = stack.pop();
-            try stack.append(b - a);
-        }
-
-        else if (op.type == OpType.Eq) {
-            if (stack.items.len < 2) {
-                diagnostics.compilerError(op.loc, "not enough argument for `=` operation", .{});
-                exit(1);
-            }
-
-            const a = stack.pop();
-            const b = stack.pop();
-            try stack.append(@intFromBool(a == b));
-        }
-
-        else if (op.type == OpType.Drop) {
-            if (stack.items.len < 1) {
-                diagnostics.compilerError(op.loc, "not enough argument for `drop` operation", .{});
-                exit(1);
-            }
-
-            _ = stack.pop();
-        }
-
-        else if (op.type == OpType.Identifier) {
-            if (ctx.const_definitions.get(op.stringArg.?)) |c| {
-                try stack.append(c.value);
-            } else {
-                diagnostics.compilerError(op.loc, "unsupported word `{s}` in compile time evaluation", .{op.stringArg.?});
-                exit(1);
-            }
-        }
-
-        else {
-            diagnostics.compilerError(op.loc, "{} is not supported in compile time evaluation", .{op.type});
-            exit(1);
-        }
-
-        ip += 1;
+        i += 1;
     }
+
 
     if (stack.items.len != 1) {
         diagnostics.compilerError(loc, "the result of an expression in compile time evaluation must be a single number", .{});
         exit(1);
     }
 
-    index.* = ip;
+    index.* = i;
 
     return stack.pop();
 }
@@ -731,7 +676,7 @@ fn processProgram(ctx: *Context, program: *std.ArrayList(Op)) !void {
                 ctx.current_proc = null;
 
             } else {
-                // NOTE: const handles `end` by itself. 
+                // NOTE: const and memory handle `end` by themselves. 
 
                 diagnostics.compilerError(op.loc, "`end` can only close `if`, `else`, `while`, `const` and `proc` blocks for now", .{});
                 exit(1);
@@ -753,22 +698,7 @@ fn processProgram(ctx: *Context, program: *std.ArrayList(Op)) !void {
             try stack.append(ip);
         } 
 
-        else if (op.type == OpType.Const) {
-            ip += 1; // skip over `const`
-            
-            if (program.items[ip].type != OpType.Identifier) {
-                diagnostics.compilerError(program.items[ip].loc, "expected const name to be {} but found {}", .{OpType.Identifier, program.items[ip].type});
-                exit(1);
-            }
-
-            const const_name = program.items[ip].stringArg;
-            const const_location = program.items[ip].loc;
-            ip += 1; // skip over the name
-            checkNameRedefinition(ctx.*, const_name.?, const_location);
-            const const_value = try evalConstValue(ctx, const_location, &ip, program);
-            ctx.*.addConst(const_name.?, Const.init(const_name.?, const_location, const_value));
-        } 
-
+        
         else if (op.type == OpType.Proc) {
             if (ctx.current_proc != null) {
                 diagnostics.compilerError(op.loc, "defining procedures inside of procedures is not allowed", .{});
@@ -778,37 +708,10 @@ fn processProgram(ctx: *Context, program: *std.ArrayList(Op)) !void {
 
             try stack.append(ip);
 
-            ip += 1;
-            if (ip >= program.items.len) {
-                diagnostics.compilerError(op.loc, "expected procedure name but found nothing", .{});
-                exit(1);
+            if (ctx.proc_definitions.getPtr(op.stringArg.?)) |proc| {
+                proc.addr = ip;
+                ctx.current_proc = proc.*;
             }
-
-            if (program.items[ip].type != OpType.Identifier) {
-                diagnostics.compilerError(program.items[ip].loc, 
-                    "expected procedure name to be {} but found {}", .{OpType.Identifier, program.items[ip].type}
-                );
-                exit(1);
-            } 
-
-            const proc_name = program.items[ip].stringArg.?;
-            const proc_loc = program.items[ip].loc;
-            checkNameRedefinition(ctx.*, proc_name, program.items[ip].loc);
-
-            ip += 1;
-            if (ip >= program.items.len) {
-                diagnostics.compilerError(op.loc, "expected keyword `in` but found nothing", .{});
-                exit(1);
-            }
-
-            if (program.items[ip].type != OpType.In) {
-                diagnostics.compilerError(program.items[ip].loc, "expected keyword `in` but found token of type {}", .{program.items[ip].type});
-                exit(1);
-            }
-
-            const proc = Proc.init(proc_name, proc_loc, ip, 0);
-            ctx.addProc(proc_name, proc);
-            ctx.current_proc = proc;
         }
     
         else if (op.type == OpType.Offset) {
@@ -819,68 +722,15 @@ fn processProgram(ctx: *Context, program: *std.ArrayList(Op)) !void {
         else if (op.type == OpType.Reset) {
             diagnostics.compilerError(op.loc, "keyword `reset` is only supported in compile time evaluation", .{});
             exit(1);
-        } 
-
-        else if (op.type == OpType.Include) {
-            ip += 1; // skip over `include`
-
-            if (program.items[ip].type != OpType.Str) {
-                diagnostics.compilerError(op.loc, "expected path to the include file to be of type main.OpType.Str but found {}", .{program.items[ip].type});
-                exit(1);
-            }
-
-            var allocator = std.heap.page_allocator; 
-            var included_program = try loadProgramFromFile(&allocator, program.items[ip].stringArg.?);
-            defer included_program.deinit();
-
-            try program.insertSlice(ip + 1, included_program.items);
-        }
-
-        else if (op.type == OpType.Memory) {
-            ip += 1; // skip over `memory` keyword 
-            if (ip >= program.items.len) {
-                diagnostics.compilerError(op.loc, "expected memory name but found nothing", .{});
-                exit(1);
-            }
-
-            if (program.items[ip].type != OpType.Identifier) {
-                diagnostics.compilerError(
-                    program.items[ip].loc, "expected memory name to be of type {} but found {}", .{OpType.Identifier, program.items[ip].type}
-                );
-                exit(1);
-            }
-
-            const memory_name = program.items[ip].stringArg.?;
-            checkNameRedefinition(ctx.*, memory_name, program.items[ip].loc);
-            ip += 1;
-
-            if (ip >= program.items.len) {
-                diagnostics.compilerError(program.items[ip].loc, "expected memory size but found nothing", .{});
-                exit(1);
-            }
-
-            const memory_size = try evalConstValue(ctx, program.items[ip].loc, &ip, program);
-            const memory_offset = ctx.memory_offset;
-            ctx.memory_offset += @intCast(memory_size); // TODO: everything should be usize 
-            ctx.addMemory(memory_name, Memory.init(memory_name, @intCast(memory_size), memory_offset, op.loc));
-        }
+        }  
 
         else if (op.type == OpType.Str) {
             program.items[ip].type = OpType.PushStr;
         }
 
-        else if (op.type == OpType.Identifier) {
-            if (ctx.const_definitions.get(op.stringArg.?)) |cdef| {
-                program.items[ip] = Op.initWithArg(OpType.Push, cdef.value, null);
-
-            } else if (ctx.proc_definitions.get(op.stringArg.?)) |proc| {
-                program.items[ip] = Op.initWithArg(OpType.Call, @intCast(proc.addr), null);
-
-            } else if (ctx.memory_definitions.get(op.stringArg.?)) |mem| {
-                program.items[ip] = Op.initWithArg(OpType.Mem, @intCast(mem.offset), null);
-            } else {
-                diagnostics.compilerError(op.loc, "unkown word: {s}", .{op.stringArg.?});
-                exit(1);
+        else if (op.type == OpType.Call) {
+            if (ctx.proc_definitions.get(op.stringArg.?)) |proc| {
+                program.items[ip].arg = @intCast(proc.addr + 1);
             }
         }
     
@@ -890,102 +740,197 @@ fn processProgram(ctx: *Context, program: *std.ArrayList(Op)) !void {
 }
 
 
-fn mapInsert(key: []const u8, value: OpType, map: *std.StringHashMap(OpType)) void {
-    map.put(key, value) catch |err| {
-        print("error occured while trying to put value into map: {?}\n", .{err});
-        exit(1);
-    };
-}
 
 
-fn parseWordAsOperation(token: Token, loc: diagnostics.Location) Op {
-    if (token.type == TokenType.Word) { 
-        var map = std.StringHashMap(OpType).init(std.heap.page_allocator);
-        defer map.deinit();
+fn createProgramFromTokens(allocator: *std.mem.Allocator, tokens: *std.ArrayList(Token), ctx: *Context) !std.ArrayList(Op) {
+    var program = std.ArrayList(Op).init(allocator.*);
 
-        mapInsert("+", OpType.Plus, &map);
-        mapInsert("-", OpType.Minus, &map);
-        mapInsert("=", OpType.Eq, &map);
-        mapInsert("dump", OpType.Dump, &map);
-        mapInsert(">", OpType.Gt, &map);
-        mapInsert("<", OpType.St, &map);
-        mapInsert("dup", OpType.Dup, &map);
-        mapInsert("2dup", OpType.Dup2, &map);
-        mapInsert("drop", OpType.Drop, &map);
-        mapInsert("swap", OpType.Swap, &map);
-        mapInsert("over", OpType.Over, &map);
-        mapInsert("if", OpType.If, &map);
-        mapInsert("else", OpType.Else, &map);
-        mapInsert("while", OpType.While, &map);
-        mapInsert("do", OpType.Do, &map);
-        mapInsert("end", OpType.End, &map);
-        mapInsert("load8", OpType.Load, &map);
-        mapInsert("store8", OpType.Store, &map);
-        mapInsert("syscall1", OpType.Syscall1, &map);
-        mapInsert("syscall3", OpType.Syscall3, &map);
-        mapInsert("shl", OpType.Shl, &map);
-        mapInsert("shr", OpType.Shr, &map);
-        mapInsert("bor", OpType.Bor, &map);
-        mapInsert("band", OpType.Band, &map);
-        mapInsert("const", OpType.Const, &map);
-        mapInsert("offset", OpType.Offset, &map);
-        mapInsert("reset", OpType.Reset, &map);
-        mapInsert("include", OpType.Include, &map);
-        mapInsert("proc", OpType.Proc, &map);
-        mapInsert("in", OpType.In, &map);
-        mapInsert("memory", OpType.Memory, &map);
-    
-        if (map.get(token.value)) |op_type| {
-            return Op.init(op_type);
-        } else {
-            return Op.initWithArg(OpType.Identifier, null, token.value); 
-        }
+    var i: usize = 0;
+    while (i < tokens.items.len) {
+        const token = tokens.items[i];
         
-    } else if (token.type == TokenType.Int) {
-        const result = std.fmt.parseInt(i32, token.value, 10) catch |err| {
-            if (err == std.fmt.ParseIntError.Overflow) {
-                diagnostics.compilerError(loc, "{?}", .{err});
+        switch (token.type) {
+            .Intrinsic => {
+                try program.append(Op.init(utils.getIntrinsicType(token.value), token.location));
+            },
+
+
+            .Keyword => {
+                const keywordType = utils.getKeywordType(token.value);
+
+                if (keywordType == OpType.Const) {
+                    i += 1; // skip over `const`
+            
+                    if (tokens.items[i].type != TokenType.Word) {
+                        diagnostics.compilerError(tokens.items[i].location, "expected const name to be {} but found {}", .{TokenType.Word, tokens.items[i].type});
+                        exit(1);
+                    }
+
+                    const const_name = tokens.items[i].value;
+                    const const_location = tokens.items[i].location;
+                    i += 1; // skip over the name
+                    checkNameRedefinition(ctx, const_name, const_location);
+
+                    const const_value = try evalConstValue(ctx, const_location, &i, tokens);
+                    ctx.addConst(const_name, Const.init(const_name, const_location, const_value));
+
+                    continue;
+                }
+
+
+                if (keywordType == OpType.Include) {
+                    i += 1; // skip over `include`
+
+                    if (tokens.items[i].type != TokenType.String) {
+                        diagnostics.compilerError(
+                            token.location,
+                            "expected path to the include file to be of type {} but found {}", .{TokenType.String, tokens.items[i].type}
+                        );
+                        exit(1);
+                    }
+
+                    var toks = try loadTokensFromFile(allocator, tokens.items[i].value);
+                    defer toks.deinit();
+
+                    try tokens.insertSlice(i + 1, toks.items);
+                }
+
+
+                if (keywordType == OpType.Memory) {
+                    i += 1; // skip over `memory` keyword
+
+                    if (i >= tokens.items.len) {
+                        diagnostics.compilerError(token.location, "expected memory name but found nothing", .{});
+                        exit(1);
+                    }
+
+                    if (tokens.items[i].type != TokenType.Word) {
+                        diagnostics.compilerError(
+                            tokens.items[i].location, "expected memory name to be of type {} but found {}", .{TokenType.Word, tokens.items[i].type}
+                        );
+                        exit(1);
+                    }
+
+                    const memory_name = tokens.items[i].value;
+                    checkNameRedefinition(ctx, memory_name, tokens.items[i].location);
+                    i += 1;
+
+                    if (i >= tokens.items.len) {
+                        diagnostics.compilerError(tokens.items[i].location, "expected memory size but found nothing", .{});
+                        exit(1);
+                    }
+
+                    const memory_size = try evalConstValue(ctx, tokens.items[i].location, &i, tokens);
+                    const memory_offset = ctx.memory_offset;
+                    ctx.memory_offset += @intCast(memory_size); // TODO: everything should be usize 
+                    ctx.addMemory(memory_name, Memory.init(memory_name, @intCast(memory_size), memory_offset, token.location));
+                    
+                    continue;
+                }
+
+
+                if (keywordType == OpType.Proc) {
+                    i += 1; // skip over `proc`
+                    if (i >= tokens.items.len) {
+                        diagnostics.compilerError(token.location, "expected procedure name but found nothing", .{});
+                        exit(1);
+                    }
+
+                    if (tokens.items[i].type != TokenType.Word) {
+                        diagnostics.compilerError(program.items[i].loc, 
+                            "expected procedure name to be {} but found {}", .{TokenType.Word, tokens.items[i].type}
+                        );
+                        exit(1);
+                    } 
+
+                    const proc_name = tokens.items[i].value;
+                    const proc_loc = tokens.items[i].location;
+                    checkNameRedefinition(ctx, proc_name, tokens.items[i].location);
+
+                    i += 1;
+                    if (i >= tokens.items.len) {
+                        diagnostics.compilerError(tokens.items[i - 1].location, "expected keyword `in` but found nothing", .{});
+                        exit(1);
+                    }
+
+                    const token_after_name = tokens.items[i];
+                    if (!std.mem.eql(u8, token_after_name.value, "in")) {
+                        diagnostics.compilerError(tokens.items[i].location, "expected keyword `in` but found token of `{s}`", .{token_after_name. value});
+                        exit(1);
+                    }
+
+                    const proc = Proc.init(proc_name, proc_loc, 0, 0);
+                    ctx.addProc(proc_name, proc);
+
+                    try program.append(Op.initWithArg(OpType.Proc, token.location, null, proc_name));
+                    continue;
+                }
+
+
+                try program.append(Op.init(keywordType, token.location));
+            },
+
+
+            .String => {
+                try program.append(Op.initWithArg(OpType.PushStr, token.location, null, token.value));
+            },
+
+
+            .Number => {
+                const result = std.fmt.parseInt(i32, token.value, 10) catch |err| {
+                    diagnostics.compilerError(token.location, "{}", .{err});
+                    exit(1);
+                };
+                
+                try program.append(Op.initWithArg(OpType.Push, token.location, result, null));
+            },
+
+
+            .Character => {
+                const char = token.value[0];
+                try program.append(Op.initWithArg(OpType.Push, token.location, @as(i32, char), null));
+            },
+
+
+            .Word => {
+                // NOTE: we pass in the function name for the function call, we set the call 
+                //       address in the crossreference phase.
+                
+                if (ctx.const_definitions.get(token.value)) |cdef| {
+                    try program.append(Op.initWithArg(OpType.Push, token.location, cdef.value, null));
+
+                } else if (ctx.proc_definitions.contains(token.value)) {
+                    try program.append(Op.initWithArg(OpType.Call, token.location, null, token.value));
+
+                } else if (ctx.memory_definitions.get(token.value)) |mem| {
+                    try program.append(Op.initWithArg(OpType.Mem, token.location, @intCast(mem.offset), null));
+                
+                } else {
+                    diagnostics.compilerError(token.location, "unkown word: {s}", .{token.value});
+                    exit(1);
+                }
+
+            },
+
+
+            else => {
+                diagnostics.compilerError(token.location, "unkown word: {s}", .{token.value});
+                exit(1);
             }
-
-            exit(1);
-        };
-
-        return Op.initWithArg(OpType.Push, result, null);
-    } else if (token.type == TokenType.String){
-        return Op.initWithArg(OpType.Str, null, token.value); 
-    } else { 
-        // character
-        const char = token.value[0]; 
-        return Op.initWithArg(OpType.Push, @as(i32, char), null);
-    }
-}
-
-
-fn isValidBase10(s: []const u8) bool {
-    if (s.len == 0) return false; // Empty string is not a valid number
-
-    var start: usize = 0;
-    if (s[0] == '-') {
-        if (s.len == 1) return false; // "-" alone is not a valid number
-        start = 1; // Skip the minus sign if present
-    }
-
-    for (start..s.len) |i| {
-        const c = s[i];
-        if (c < '0' or c > '9') {
-            return false; // Not a digit
         }
+
+        i += 1;
     }
 
-    return true; // All characters are valid digits
+    return program;
 }
 
 
-fn loadProgramFromFile(allocator: *std.mem.Allocator, path: []const u8) !std.ArrayList(Op) {
+fn loadTokensFromFile(allocator: *std.mem.Allocator, path: []const u8) !std.ArrayList(Token) {
     var file = try std.fs.cwd().openFile(path, .{});
     defer file.close();
 
-    var tokens = std.ArrayList(Op).init(allocator.*);
+    var tokens = std.ArrayList(Token).init(allocator.*);
     var reader = std.io.bufferedReader(file.reader());
     var line_number: i32 = 1;
 
@@ -1017,12 +962,10 @@ fn loadProgramFromFile(allocator: *std.mem.Allocator, path: []const u8) !std.Arr
                     
                     const complete_string = try current_string.toOwnedSlice();
                     const col = token_start_col;
-                    const tok = Token.init(complete_string, TokenType.String);
-
                     const location = diagnostics.Location.init(line_number, @intCast(col), path);
-                    var operation = parseWordAsOperation(tok, location);
-                    operation.loc = location;
-                    try tokens.append(operation);
+
+                    const tok = Token.init(TokenType.String, complete_string, location);
+                    try tokens.append(tok);
 
                     current_string.clearAndFree(); // Reset for the next string
                 } else {
@@ -1069,12 +1012,9 @@ fn loadProgramFromFile(allocator: *std.mem.Allocator, path: []const u8) !std.Arr
                     // Convert the character to a string
                     const char_string = try std.fmt.allocPrint(std.heap.page_allocator, "{c}", .{char_value});
 
-                    const tok = Token.init(char_string, TokenType.Char);
-
-                    const location = diagnostics.Location.init(line_number, @intCast(token_start_col), path);
-                    var operation = parseWordAsOperation(tok, location);
-                    operation.loc = location;
-                    try tokens.append(operation);
+                    const location = diagnostics.Location.init(line_number, @intCast(token_start_col), path);    
+                    const tok = Token.init(TokenType.Character, char_string, location);
+                    try tokens.append(tok);
                     
                     index += 1; // skip over the last '
                     in_char = false;
@@ -1097,16 +1037,19 @@ fn loadProgramFromFile(allocator: *std.mem.Allocator, path: []const u8) !std.Arr
                 if (current_string.items.len > 0) {
                     // Emit the previous token if it exists
                     const token_str = try current_string.toOwnedSlice();
-                    var tok = Token.init(token_str, TokenType.Word);
-                    
-                    if (isValidBase10(token_str)) {
-                        tok.type = TokenType.Int;
-                    }
 
                     const location = diagnostics.Location.init(line_number, @intCast(token_start_col), path);
-                    var operation = parseWordAsOperation(tok, location);
-                    operation.loc = location;
-                    try tokens.append(operation);
+                    var tok = Token.init(TokenType.Word, token_str, location);
+
+                    if (utils.isValidBase10(token_str)) {
+                        tok.type = TokenType.Number;
+                    } else if (utils.isIntrinsic(token_str)) {
+                        tok.type = TokenType.Intrinsic;
+                    } else if (utils.isKeyword(token_str)) {
+                        tok.type = TokenType.Keyword;
+                    }
+
+                    try tokens.append(tok);
 
                     current_string.clearAndFree(); // Reset for the next token
                 }
@@ -1122,16 +1065,19 @@ fn loadProgramFromFile(allocator: *std.mem.Allocator, path: []const u8) !std.Arr
         // If there's any remaining token or string
         if (current_string.items.len > 0) {
             const token_str = try current_string.toOwnedSlice();
-            var tok = Token.init(token_str, TokenType.Word);
-
-            if (isValidBase10(token_str)) {
-                tok.type = TokenType.Int;
-            }
 
             const location = diagnostics.Location.init(line_number, @intCast(token_start_col), path);
-            var operation = parseWordAsOperation(tok, location);
-            operation.loc = location;
-            try tokens.append(operation);
+            var tok = Token.init(TokenType.Word, token_str, location);
+
+            if (utils.isValidBase10(token_str)) {
+                tok.type = TokenType.Number;
+            } else if (utils.isIntrinsic(token_str)) {
+                tok.type = TokenType.Intrinsic;
+            } else if (utils.isKeyword(token_str)) {
+                tok.type = TokenType.Keyword;
+            }
+
+            try tokens.append(tok);
         }
 
         line_number += 1;
@@ -1175,11 +1121,14 @@ pub fn main() !void {
             exit(1);
         }
 
-        var program = try loadProgramFromFile(&allocator, argv[0]);
-        defer program.deinit();
+        var tokens = try loadTokensFromFile(&allocator, argv[0]);
+        defer tokens.deinit();
 
         var ctx = Context.init();
         defer ctx.deinit();
+
+        var program = try createProgramFromTokens(&allocator, &tokens, &ctx);
+        defer program.deinit();
 
         try processProgram(&ctx, &program);
         try compile_program(program, "output.asm");

@@ -7,20 +7,42 @@
 
 include "std/linux.zorth"
 
+
 const std.stdin  0 end
 const std.stdout 1 end
 const std.stderr 2 end
 
 
+// prints a string to stdout, parameters will be removed from the stack.
 // @param: size ptr
+// @retrn: none
 proc puts in 
 	std.stdout 			// fd
 	std.syscall.write	// call write syscall
 end
 
 
-// @param: size ptr 
+// prints a string to stderr, parameters will be removed from the stack.
+// @param:  size ptr 
+// @return: none
 proc eputs in 
 	std.stderr          // fd
 	std.syscall.write   // call write syscall 
+end
+
+
+// calculates the lenght of a *null-terminated* string in memory.
+// @param:  ptr 
+// @return: ptr size 
+proc strlen in 
+	0 swap					// push initial lenght (0) and swap with the pointer
+							
+	while 					
+		dup load8 0 > 		// load the byte at the current pointer, check if it's not zero
+	do 
+		swap 1 + swap		// increment the pointer (1 + ptr), swap back to preserve order
+		1 +					// increment the lenght counter
+	end
+
+	swap 					// swap the pointer and size so size is on top of the stack
 end

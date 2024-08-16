@@ -1,3 +1,7 @@
+//  Copyright (c) Noah Van Miert 2024
+//  Licensed under the MIT license. Use at your own risk!
+//  12/08/2024 
+
 const std = @import("std");
 
 const print = std.debug.print;
