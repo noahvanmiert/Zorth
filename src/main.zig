@@ -1089,13 +1089,96 @@ fn loadTokensFromFile(allocator: *std.mem.Allocator, path: []const u8) !std.Arra
 
 
 fn usage() void {
-    print("Usage: zorth <SUBCOMMAND> [ARGS]\n", .{});
-    print("SUBCOMMANDS:\n", .{});
-    print("    com <file>    Compile the program\n", .{});
+    print("Usage: zorth [options] [file]\n\n", .{});
+    print("Options:\n", .{});
+    print("    -h, --help     Prints this help message.\n", .{});
+    print("    -r, --run      Runs the program directly after compilation.\n", .{});
+    print("    -s, --asm      Only generate assembly, no executable\n", .{});
+    print("    --unsafe       Disables type checking.\n\n", .{});
+    print("For more information, visit https://github.com/noahvanmiert/Zorth\n", .{});
 }
 
 
+fn checkFlag(flag: []const u8, f1: []const u8, f2: []const u8) bool {
+    return std.mem.eql(u8, flag, f1) or std.mem.eql(u8, flag, f2);
+}
+
+
+const Flags = struct {
+    unsafe: bool = false,
+    run: bool = false,
+    assembly: bool = false,
+};
+
+
 pub fn main() !void {
+    var allocator = std.heap.page_allocator;
+
+    const args = try std.process.argsAlloc(allocator);
+    defer std.process.argsFree(allocator, args);
+
+    var arguments = args;
+    var flags: Flags = Flags{};
+    var filepath: []const u8 = "";
+
+    if (args.len < 2) {
+        print("ERROR: no file provided\n\n", .{});
+        usage();
+        return;
+    }
+
+    arguments = arguments[1..]; // skip over program name
+
+    for (arguments) |arg| {
+        if (arg[0] == '-') {
+            // parse flag
+            const flag = arg;
+
+            if (checkFlag(flag, "--unsafe", "--unsafe")) {
+                flags.unsafe = true;
+            } else if (checkFlag(flag, "-r", "--run")) {
+                flags.run = true;
+            } else if (checkFlag(flag, "-s", "--asm")) {
+                flags.assembly = true;
+            } else if (checkFlag(flag, "-h", "--help")) {
+                usage();
+                return;
+            } else {
+                print("ERROR: unkown flag: {s}\n\n", .{flag});
+                usage();
+                return;
+            }
+
+        } else {
+            // parse filepath
+            filepath = arg;
+        }
+    }
+
+    var tokens = try loadTokensFromFile(&allocator, filepath);
+    defer tokens.deinit();
+
+    var ctx = Context.init();
+    defer ctx.deinit();
+
+    var program = try createProgramFromTokens(&allocator, &tokens, &ctx);
+    defer program.deinit();
+
+    try processProgram(&ctx, &program);
+    try compile_program(program, "output.asm");
+
+    if (!flags.assembly) {
+        try subprocess.call(&.{"nasm", "-felf64", "output.asm"});
+        try subprocess.call(&.{"ld", "-o", "output", "output.o"});
+    
+        if (flags.run) {
+            try subprocess.call(&.{"./output"});
+        }
+    }
+}
+
+
+pub fn main2() !void {
     var allocator = std.heap.page_allocator;
 
     const args = try std.process.argsAlloc(allocator);
