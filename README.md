@@ -19,7 +19,7 @@
 ## Introduction
 
 
-Zorth is designed to be a minimalist and easy-to-use stack-based language. Inspired by Porth.
+Zorth is designed to be a minimalist and easy-to-use stack-based language. Inspired by (Porth)[https://gitlab.com/tsoding/porth].
 
 
 ## Features
@@ -99,10 +99,10 @@ Here are a few example programs in Zorth:
 ## Credits
 
 
-Zorth is heavily inspired by (Porth)[https://gitlab.com/tsoding/porth], a stack-based language created by Tsoding. 
+Zorth is heavily inspired by [Porth](https://gitlab.com/tsoding/porth), a stack-based language created by Tsoding. 
 
 
 ## License
 
 
-Zorth is licensed under the (MIT License)[https://en.wikipedia.org/wiki/MIT_License]. See the `**LICENSE**` file for more details.
+Zorth is licensed under the [MIT License](https://en.wikipedia.org/wiki/MIT_License). See the `LICENSE` file for more details.
