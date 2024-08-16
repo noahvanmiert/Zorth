@@ -19,7 +19,7 @@
 ## Introduction
 
 
-Zorth is designed to be a minimalist and easy-to-use stack-based language. Inspired by (Porth)[https://gitlab.com/tsoding/porth].
+Zorth is designed to be a minimalist and easy-to-use stack-based language. Inspired by [Porth](https://gitlab.com/tsoding/porth).
 
 
 ## Features
