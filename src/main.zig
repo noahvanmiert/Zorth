@@ -30,9 +30,9 @@ const Globals = enum(i32) {
 const Const = struct {
     name: []const u8,
     loc: diagnostics.Location,
-    value: i32,
+    value: i64,
 
-    fn init(name: []const u8, loc: diagnostics.Location, value: i32) Const {
+    fn init(name: []const u8, loc: diagnostics.Location, value: i64) Const {
         return Const {
             .name = name,
             .loc = loc,
@@ -488,10 +488,10 @@ fn checkNameRedefinition(ctx: *Context, name: []const u8, loc: diagnostics.Locat
 }
 
 
-fn evalConstValue(ctx: *Context, loc: diagnostics.Location, index: *usize, tokens: *const std.ArrayList(Token)) !i32 {
+fn evalConstValue(ctx: *Context, loc: diagnostics.Location, index: *usize, tokens: *const std.ArrayList(Token)) !i64 {
     var i = index.*; 
 
-    var stack = std.ArrayList(i32).init(std.heap.page_allocator);
+    var stack = std.ArrayList(i64).init(std.heap.page_allocator);
     defer stack.deinit();
 
     while (i < tokens.items.len) {
@@ -561,12 +561,12 @@ fn evalConstValue(ctx: *Context, loc: diagnostics.Location, index: *usize, token
                     },
  
                     .Offset => {
-                        try stack.append(@intCast(ctx.iota));
+                        try stack.append(ctx.iota);
                         ctx.iota += 1;
                     },
 
                     .Reset => {
-                        try stack.append(@intCast(ctx.iota));
+                        try stack.append(ctx.iota);
                         ctx.iota = 0;
                     },
 
@@ -578,7 +578,7 @@ fn evalConstValue(ctx: *Context, loc: diagnostics.Location, index: *usize, token
             },
 
             .Number => {
-                const result = std.fmt.parseInt(i32, token.value, 10) catch |err| {
+                const result = std.fmt.parseInt(i64, token.value, 10) catch |err| {
                     diagnostics.compilerError(token.location, "{}", .{err});
                     exit(1);
                 };
@@ -588,7 +588,7 @@ fn evalConstValue(ctx: *Context, loc: diagnostics.Location, index: *usize, token
 
             .Character => {
                 const char = token.value[0];
-                try stack.append(@as(i32, char));
+                try stack.append(@as(i64, char));
             },
 
             .Word => {
@@ -877,7 +877,7 @@ fn createProgramFromTokens(allocator: *std.mem.Allocator, tokens: *std.ArrayList
 
 
             .Number => {
-                const result = std.fmt.parseInt(i32, token.value, 10) catch |err| {
+                const result = std.fmt.parseInt(i64, token.value, 10) catch |err| {
                     diagnostics.compilerError(token.location, "{}", .{err});
                     exit(1);
                 };
@@ -888,7 +888,7 @@ fn createProgramFromTokens(allocator: *std.mem.Allocator, tokens: *std.ArrayList
 
             .Character => {
                 const char = token.value[0];
-                try program.append(Op.initWithArg(OpType.Push, token.location, @as(i32, char), null));
+                try program.append(Op.initWithArg(OpType.Push, token.location, @as(i64, char), null));
             },
 
 
@@ -932,7 +932,7 @@ fn loadTokensFromFile(allocator: *std.mem.Allocator, path: []const u8) !std.Arra
 
     var tokens = std.ArrayList(Token).init(allocator.*);
     var reader = std.io.bufferedReader(file.reader());
-    var line_number: i32 = 1;
+    var line_number: usize = 1;
 
     while (true) {
         const line = try reader.reader().readUntilDelimiterOrEofAlloc(allocator.*, '\n', 255);
@@ -962,7 +962,7 @@ fn loadTokensFromFile(allocator: *std.mem.Allocator, path: []const u8) !std.Arra
                     
                     const complete_string = try current_string.toOwnedSlice();
                     const col = token_start_col;
-                    const location = diagnostics.Location.init(line_number, @intCast(col), path);
+                    const location = diagnostics.Location.init(line_number, col, path);
 
                     const tok = Token.init(TokenType.String, complete_string, location);
                     try tokens.append(tok);
@@ -1000,7 +1000,7 @@ fn loadTokensFromFile(allocator: *std.mem.Allocator, path: []const u8) !std.Arra
                             'r' => char_value = '\r',
                             '0' => char_value = '\x00', // Null character
                             else => {
-                                const location = diagnostics.Location.init(line_number, @intCast(token_start_col), path);
+                                const location = diagnostics.Location.init(line_number, token_start_col, path);
                                 diagnostics.compilerError(location, "unrecognized escape sequence '\\{c}'", .{escape});
                                 exit(1);
                             },
@@ -1012,7 +1012,7 @@ fn loadTokensFromFile(allocator: *std.mem.Allocator, path: []const u8) !std.Arra
                     // Convert the character to a string
                     const char_string = try std.fmt.allocPrint(std.heap.page_allocator, "{c}", .{char_value});
 
-                    const location = diagnostics.Location.init(line_number, @intCast(token_start_col), path);    
+                    const location = diagnostics.Location.init(line_number, token_start_col, path);    
                     const tok = Token.init(TokenType.Character, char_string, location);
                     try tokens.append(tok);
                     
@@ -1038,7 +1038,7 @@ fn loadTokensFromFile(allocator: *std.mem.Allocator, path: []const u8) !std.Arra
                     // Emit the previous token if it exists
                     const token_str = try current_string.toOwnedSlice();
 
-                    const location = diagnostics.Location.init(line_number, @intCast(token_start_col), path);
+                    const location = diagnostics.Location.init(line_number, token_start_col, path);
                     var tok = Token.init(TokenType.Word, token_str, location);
 
                     if (utils.isValidBase10(token_str)) {
@@ -1066,7 +1066,7 @@ fn loadTokensFromFile(allocator: *std.mem.Allocator, path: []const u8) !std.Arra
         if (current_string.items.len > 0) {
             const token_str = try current_string.toOwnedSlice();
 
-            const location = diagnostics.Location.init(line_number, @intCast(token_start_col), path);
+            const location = diagnostics.Location.init(line_number, token_start_col, path);
             var tok = Token.init(TokenType.Word, token_str, location);
 
             if (utils.isValidBase10(token_str)) {

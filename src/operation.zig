@@ -50,7 +50,7 @@ pub const OpType = enum {
 
 pub const Op = struct {
     type: OpType,
-    arg: ?i32,
+    arg: ?i64,
     stringArg: ?[]const u8,
     loc: diagnostics.Location,
 
@@ -63,7 +63,7 @@ pub const Op = struct {
         };
     }
 
-    pub fn initWithArg(op_type: OpType, loc: diagnostics.Location, arg: ?i32, stringArg: ?[]const u8) Op {
+    pub fn initWithArg(op_type: OpType, loc: diagnostics.Location, arg: ?i64, stringArg: ?[]const u8) Op {
         return Op {
             .type = op_type,
             .arg = arg,

@@ -8,11 +8,11 @@ const print = std.debug.print;
 
 
 pub const Location = struct {
-    line: i32,
-    col: i32,
+    line: usize,
+    col: usize,
     filepath: []const u8,
 
-    pub fn init(line: i32, col: i32, filepath: []const u8) Location {
+    pub fn init(line: usize, col: usize, filepath: []const u8) Location {
         return Location {
             .line = line,
             .col = col,
